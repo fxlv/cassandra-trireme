@@ -29,7 +29,7 @@ Cassandra uses 2^64 partitions, and the complexity of doing the full scan lies i
 Now, there might be a better way, but currently seems easiest is just to do many queries by specifying particular range of tokens.
 This is similar to how Cassandra Reaper does it.
 
-Very simple approach that seems to work for me is to use divide the 2^64 range by number in that is a power of 10.
+Very simple approach that seems to work for me is to divide the 2^64 range by number in that is a power of 10.
 So, for example if I use 10^18, this divides the 2^64 nicely into 18 splits.
 You can experiment with this number and the bigger the table the smaller number you can specify.
 So, for example for a 4M+ table, number 10^15 works well.
@@ -39,6 +39,5 @@ For now, default is 10^18, and if you need smaller splits, you can specify small
 
 ## Current status
 
-This is very much work in progress, currently it works, but requires you to hardcode all the options in the script.
-On the todo list is to add SSL support and argument support via CLI.
+This is very much work in progress, currently it works, but isn't pretty.
 Feel free to jump in if you wish.
