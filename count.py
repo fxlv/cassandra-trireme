@@ -6,9 +6,6 @@ from ssl import SSLContext, PROTOCOL_TLSv1
 from cassandra.auth import PlainTextAuthProvider
 
 
-
-
-
 def parse_user_args():
     parser = argparse.ArgumentParser()
     parser.description = "Cassandra row counter"
@@ -28,12 +25,14 @@ def parse_user_args():
 
 
 def count_rows(host, keyspace, table, key, split, port, user, password, ssl_cert, ssl_key):
-    ssl_context = SSLContext(PROTOCOL_TLSv1)
-
-
-    ssl_context.load_cert_chain(
-        certfile=ssl_cert,
-        keyfile=ssl_key)
+    if ssl_cert == None and ssl_key == None:
+        # skip setting up ssl
+        ssl_context = None
+    else:
+        ssl_context = SSLContext(PROTOCOL_TLSv1)
+        ssl_context.load_cert_chain(
+            certfile=ssl_cert,
+            keyfile=ssl_key)
 
     auth_provider  = PlainTextAuthProvider(username=user, password=password)
     cluster = Cluster([host], port=port, ssl_context=ssl_context, auth_provider=auth_provider)
