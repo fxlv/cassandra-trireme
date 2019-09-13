@@ -23,6 +23,28 @@ With SSL (certificate and key must be in PEM format):
 
 ```./count.py 127.0.0.1 system_auth roles role --port 9142 --user testuser --pass testpass --ssl-certificate client.cer.pem --ssl-key key.pem```
 
+### Filtering
+
+Sometimes you need to do filtering, and this can be done by adding extra conditions to `WHERE` clause.
+
+This is not a safe thing to do (as there is no sanitization here), but if you must - you can (safety not guaranteed).
+
+In this case we count rows that have `id` field set to integer `1`
+
+```./count.py 127.0.0.1 test testtable id --filter-string="id = 1"```
+
+In case you need to filter by a column that is not indexed, you'll have to `ALLOW FILTERING` as follows:
+
+```./count.py 127.0.0.1 test1 testtable id --filter-string="another_unindexed_id = 1 ALLOW FILTERING" --debug```
+
+### Looking at data
+
+Sometimes you just wonder what data you have in there and perhhaps you want to do a query like: hey give me all the rows that have 'some_column' set to `False`.
+Then you could do:
+```
+./count.py 172.17.86.134 test1 testtable2 id --filter-string="something = False ALLOW FILTERING" --debug --value-column name
+```
+
 ## Split size
 
 Cassandra uses 2^64 partitions, and the complexity of doing the full scan lies in the fact that it has to query all of them to get the row count.
