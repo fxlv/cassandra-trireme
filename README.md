@@ -155,6 +155,12 @@ But of course - _caveat emptor_.
 
 ### Additional information
 
+#### Multi threading
+
+It uses 15 threads by default. 
+I forgot to implement an option for that, so you can just search for `thread_count` in the code if you want to change it.
+Or better yet - make a PR and fix it :)
+
 
 #### Debugging
 
