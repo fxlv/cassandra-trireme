@@ -34,6 +34,13 @@ And that is the other key thing that this tool allows you to do.
 
 ## User guide
 
+### Installing
+
+Not much to do here, it _just works_. 
+Tested on Linux and Windows, Python 3.4 - Python 3.7.
+
+You do need to insatll `cassandra-driver` python module first though.
+
 ### A sidenote on SSL
 
 This tool optionally supports SSL, just pass the necessary options to it.
