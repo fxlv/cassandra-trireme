@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 #
+# Trireme
+#
 # Cassandra database row counter and manipulator.
-# Need to come up with a better name :)
 #
 # kaspars@fx.lv
 #
@@ -16,16 +17,31 @@ import queue
 import time
 import datetime
 
-min_token = -9223372036854775808
-max_token = 9223372036854775807
+default_min_token = -9223372036854775808
+default_max_token = 9223372036854775807
 
+class Result:
+
+    def __init__(self, min, max, value):
+        self.min = min
+        self.max = max
+        self.value = value
+
+    def __str__(self):
+        return "Result(min: {}, max: {}, value: {})".format(self.min, self.max, self.value)
+
+class Token_range:
+
+    def __init__(self, min, max):
+        self.min = min
+        self.max = max
 
 def parse_user_args():
     """Parse commandline arguments."""
     parser = argparse.ArgumentParser()
-    parser.description = "Cassandra row counter"
+    parser.description = "Trireme - Cassandra row manipulator"
     parser.add_argument("action", type=str,
-                        choices=["count-rows", "print-rows", "update-rows", "delete-rows", "find-nulls"],
+                        choices=["count-rows", "print-rows", "update-rows", "delete-rows", "find-nulls", "find-wide-partitions"],
                         help="What would you like to do?")
     parser.add_argument("host", type=str, help="Cassandra host")
     parser.add_argument("keyspace", type=str, help="Keyspace to use")
@@ -148,25 +164,29 @@ def sql_query(sql_statement, key_column, result_list, failcount, sql_list, filte
             if result_list.qsize() % 100 == 0:
                 logging.debug("Executing: {}".format(sql))
             result = session.execute(sql)
-            result_list.put(result)
+            r = Result(min, max, result)
+            result_list.put(r)
         except Exception as e:
             failcount += 1
             logging.warning("Got Cassandra exception: {msg} when running query: {sql}".format(sql=sql, msg=e))
 
 
-def distributed_sql_query(sql_statement, key_column, split, filter_string):
+def distributed_sql_query(sql_statement, key_column, split, filter_string, token_range=None):
     start_time = datetime.datetime.now()
     sql_list = []
     result_list = queue.Queue()
     failcount = 0
     thread_count = 15
-
+    if not token_range:
+        tr = Token_range(default_min_token, default_max_token)
+    else:
+        tr = token_range
     # calculate token ranges for distributing the query
-    i = min_token
+    i = tr.min
     logging.debug("Preparing splits...")
-    while i <= max_token - 1:
+    while i <= tr.max - 1:
         i_max = i + pow(10, split)
-        if i_max > max_token: i_max = max_token  # don't go higher than max_token
+        if i_max > tr.max: i_max = tr.max  # don't go higher than max_token
         sql_list.append((i, i_max))
         i = i_max
     logging.debug("sql list length is {}".format(len(sql_list)))
@@ -217,7 +237,7 @@ def reductor(result_set):
     result_list = []
     while result_set.qsize() > 0:
         result = result_set.get()
-        for row in result:
+        for row in result.value:
             result_list.append(row)
     return result_list
 
@@ -235,7 +255,7 @@ def update_rows(session, keyspace, table, key, update_key, update_value, split, 
 
     When Updating rows in Cassandra you can't filter by token range.
     So what we do is find all the primary keys for the rows that
-    we would like to update, and then run an upadate in a for loop.
+    we would like to update, and then run an update in a for loop.
     """
     session.execute("use {}".format(keyspace))
     rows = get_rows(session, keyspace, table, key, split, update_key, filter_string, extra_key)
@@ -293,24 +313,107 @@ def get_rows(session, keyspace, table, key, split, value_column=None, filter_str
     return (reductor(result))
 
 
-def get_rows_count(session, keyspace, table, key, split, filter_string=None):
+def get_rows_count(session, keyspace, table, key, split, filter_string=None, aggregate=True, token_range=None):
     session.execute("use {}".format(keyspace))
 
     sql_template = "select count(*) from {keyspace}.{table}"
 
     sql_statement = sql_template.format(keyspace=keyspace, table=table)
-    result = distributed_sql_query(sql_statement, key_column=key, split=split, filter_string=filter_string)
+    result = distributed_sql_query(sql_statement, key_column=key, split=split, filter_string=filter_string, token_range=token_range)
     count = 0
+
+    unaggregated_count = []
     while result.qsize() > 0:
         r = result.get()
-        count += r[0].count
-    return count
+        if aggregate:
+            count += r.value[0].count
+        else:
+            split_count = Result(r.min, r.max, r.value[0])
+            unaggregated_count.append(split_count)
+    if aggregate:
+        return count
+    else:
+        return unaggregated_count
+
 
 
 def print_rows(session, keyspace, table, key, split, value_column=None, filter_string=None):
     rows = get_rows(session, keyspace, table, key, split, value_column, filter_string)
     for row in rows:
         print(row)
+
+def find_wide_partitions(session, keyspace, table, key, split, value_column=None, filter_string=None):
+    # select count(*) from everywhere, record all the split sizes
+    # get back a list of dictionaries [ {'min': 123, 'max',124, 'count':1 } ]
+    # sort it by 'count' and show top 5 or something
+
+    # get rows count, but don't aggregate
+    count = get_rows_count(session, keyspace, table, key, split, filter_string, False)
+    # now we have count of rows per split, let's sort it
+    count.sort(key=lambda x: x.value, reverse=True)
+    # now that we know the most highly loaded splits, we can drill down
+    most_loaded_split = count[0]
+    tr = Token_range(most_loaded_split.min, most_loaded_split.max)
+    most_loaded_split_count = get_rows_count(session, keyspace, table, key, split=14, filter_string=None, aggregate=False, token_range=tr)
+    most_loaded_split_count.sort(key=lambda x: x.value, reverse=True)
+
+
+    tr = Token_range(most_loaded_split_count[0].min, most_loaded_split_count[0].max)
+
+    most_loaded_split_count2 = get_rows_count(session, keyspace, table, key, split=12, filter_string=None,
+                                             aggregate=False, token_range=tr)
+    most_loaded_split_count2.sort(key=lambda x: x.value, reverse=True)
+
+    tr = Token_range(most_loaded_split_count2[0].min, most_loaded_split_count2[0].max)
+
+    most_loaded_split_count3 = get_rows_count(session, keyspace, table, key, split=10, filter_string=None,
+                                              aggregate=False, token_range=tr)
+    most_loaded_split_count3.sort(key=lambda x: x.value, reverse=True)
+
+
+
+    # narrow it down to 100 million split size
+    tr = Token_range(most_loaded_split_count3[0].min, most_loaded_split_count3[0].max)
+
+    most_loaded_split_count4 = get_rows_count(session, keyspace, table, key, split=8, filter_string=None,
+                                              aggregate=False, token_range=tr)
+    most_loaded_split_count4.sort(key=lambda x: x.value, reverse=True)
+
+    # narrow it down to 1 million split size
+    tr = Token_range(most_loaded_split_count4[0].min, most_loaded_split_count4[0].max)
+
+    most_loaded_split_count5 = get_rows_count(session, keyspace, table, key, split=6, filter_string=None,
+                                              aggregate=False, token_range=tr)
+    most_loaded_split_count5.sort(key=lambda x: x.value, reverse=True)
+
+    # narrow it down to 1 thousand split size
+    tr = Token_range(most_loaded_split_count5[0].min, most_loaded_split_count5[0].max)
+
+    most_loaded_split_count6 = get_rows_count(session, keyspace, table, key, split=3, filter_string=None,
+                                              aggregate=False, token_range=tr)
+    most_loaded_split_count6.sort(key=lambda x: x.value, reverse=True)
+
+    # narrow it down to 10 split size
+    tr = Token_range(most_loaded_split_count6[0].min, most_loaded_split_count6[0].max)
+
+    most_loaded_split_count7 = get_rows_count(session, keyspace, table, key, split=1, filter_string=None,
+                                              aggregate=False, token_range=tr)
+    most_loaded_split_count7.sort(key=lambda x: x.value, reverse=True)
+
+
+    print(most_loaded_split)
+    print(most_loaded_split_count[0])
+    print(most_loaded_split_count2[0])
+    print(most_loaded_split_count3[0])
+    print(most_loaded_split_count4[0]) # 100 million precision
+    print(most_loaded_split_count5[0]) # 1 million precision
+    print(most_loaded_split_count6[0]) # 1 thousand precision
+    print(most_loaded_split_count7[0]) # 10 precision
+
+
+
+
+    # .......
 
 
 def print_rows_count(session, keyspace, table, key, split, filter_string=None):
@@ -337,6 +440,8 @@ if __name__ == "__main__":
         print_rows_count(session, args.keyspace, args.table, args.key, args.split, args.filter_string)
     elif args.action == "print-rows":
         print_rows(session, args.keyspace, args.table, args.key, args.split, args.value_column, args.filter_string)
+    elif args.action == "find-wide-partitions":
+        find_wide_partitions(session, args.keyspace, args.table, args.key, args.split, args.value_column, args.filter_string)
     elif args.action == "update-rows":
         update_rows(session, args.keyspace, args.table, args.key, args.update_key, args.update_value, args.split,
                     args.filter_string, args.extra_key)
