@@ -10,7 +10,7 @@ from cassandra.cluster import Cluster
 import argparse
 import sys
 import logging
-from ssl import SSLContext, PROTOCOL_TLSv1_2
+from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
 from cassandra.auth import PlainTextAuthProvider
 import threading
 import queue
@@ -58,18 +58,24 @@ def parse_user_args():
     parser.add_argument("--password", type=str, default="cassandra", help="Cassandra password")
     parser.add_argument("--ssl-certificate", dest="ssl_cert", type=str, help="SSL certificate to use")
     parser.add_argument("--ssl-key", type=str, dest="ssl_key", help="Key for the SSL certificate")
+    parser.add_argument("--ssl-use-tls-v1", action="store_true", dest="ssl_v1", help="Use TLS1 instead of 1.2")
+
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     args = parser.parse_args()
     return args
 
 
-def get_cassandra_session(host, port, user, password, ssl_cert, ssl_key):
+def get_cassandra_session(host, port, user, password, ssl_cert, ssl_key, ssl_v1=False):
     """Establish Cassandra connection and return session object."""
     if ssl_cert == None and ssl_key == None:
         # skip setting up ssl
         ssl_context = None
     else:
-        ssl_context = SSLContext(PROTOCOL_TLSv1_2)
+        if ssl_v1:
+            tls_version = PROTOCOL_TLSv1
+        else:
+            tls_version = PROTOCOL_TLSv1_2
+        ssl_context = SSLContext(tls_version)
         ssl_context.load_cert_chain(
             certfile=ssl_cert,
             keyfile=ssl_key)
@@ -432,7 +438,7 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(level=logging.INFO)
 
-    session = get_cassandra_session(args.host, args.port, args.user, args.password, args.ssl_cert, args.ssl_key)
+    session = get_cassandra_session(args.host, args.port, args.user, args.password, args.ssl_cert, args.ssl_key, args.ssl_v1)
 
     if args.action == "find-nulls":
         find_null_cells(session, args.keyspace, args.table, "id", "comment")

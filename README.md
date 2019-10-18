@@ -193,4 +193,3 @@ Feel free to jump in if you wish.
 As this tool mainly deals with different aspects of row counting and manipulation, then it seems rowing motive might be in order.
 And keeping inline with Cassandra, Trireme is a type of ancient greek galley, with three rows of oars. So lots of rowing.
 Hence the name.
-
