@@ -39,7 +39,7 @@ And that is the other key thing that this tool allows you to do.
 Not much to do here, it _just works_. 
 Tested on Linux and Windows, Python 3.4 - Python 3.7.
 
-You do need to insatll `cassandra-driver` python module first though.
+You do need to install `cassandra-driver` python module first though.
 
 ### A sidenote on SSL
 
@@ -58,7 +58,7 @@ For brevity, I will omit the SSL arguments in most examples.
 ### Required positional arguments
 
 The tool supports multiple actions, such as counting, updating etc.
-For these opeartions to work, you will have to provide some arguments.
+For these operations to work, you will have to provide some arguments.
 
 |Argument| Description |
 | --- | --- |
