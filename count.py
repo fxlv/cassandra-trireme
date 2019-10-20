@@ -6,16 +6,17 @@
 #
 # kaspars@fx.lv
 #
-from cassandra.cluster import Cluster
 import argparse
-import sys
-import logging
-from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
-from cassandra.auth import PlainTextAuthProvider
-import threading
-import queue
-import time
 import datetime
+import logging
+import queue
+import sys
+import threading
+import time
+from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
+
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import Cluster
 
 default_min_token = -9223372036854775808
 default_max_token = 9223372036854775807
@@ -146,11 +147,13 @@ def find_null_cells(session, keyspace, table, key_column, value_column):
 
     Finding 'Null' columns in a table.
 
-    'key_column' - the column that cotains some meaningful key/id. Your primary key most likely.
+    'key_column' - the column that cotains some meaningful key/id.
+    Your primary key most likely.
     'value_column' - the column where you wish to search for 'Null'
 
     Having 'Null' cells in Cassandra is the same as not having them.
-    However if you don't control the data model or cannot change it for whatever reason but still want to know
+    However if you don't control the data model or cannot change it
+    for whatever reason but still want to know
     how many such 'Null' cells you have, you are bit out of luck.
     Filtering by 'Null' is not something that you can do in Cassandra.
     So what you can do is to query them and look for 'Null' in the result.
@@ -170,8 +173,6 @@ def find_null_cells(session, keyspace, table, key_column, value_column):
     logging.debug("Executing: {}".format(sql))
     result = session.execute(sql)
     result_list = [r for r in result if getattr(r, value_column) == None]
-
-    # print("Total amount of rows in {keyspace}.{table} is {sum}".format(keyspace=keyspace, table=table, sum=total_sum))
 
 
 def batch_sql_query(sql_statement, key_name, key_list, dry_run=False):
@@ -317,7 +318,8 @@ def distributed_sql_query(sql_statement,
                     logging.debug("{} results / s".format(result_per_sec))
                 time.sleep(10)
         logging.debug("No more work left, waiting for all threads to stop.")
-        # TODO: maybe instead send the kill pill or check thread liveliness in some other way
+        # TODO: maybe instead send the kill pill
+        #  or check thread liveliness in some other way
         # instead of just blindly waiting for a sec
         time.sleep(1)
     except KeyboardInterrupt:
@@ -388,7 +390,8 @@ def update_rows(session,
                 update_value=update_value,
                 filter_string=filter_string))
 
-    # surround update value with quotes in case it is a string, but don't do it if it looks like a string
+    # surround update value with quotes in case it is a string,
+    # but don't do it if it looks like a string
     # but in reality is meant to be a a boolean
     booleans = ["true", "false"]
     if isinstance(update_value, str):
