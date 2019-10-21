@@ -118,7 +118,7 @@ def get_cassandra_session(host,
                           ssl_key,
                           ssl_v1=False):
     """Establish Cassandra connection and return session object."""
-    if ssl_cert == None and ssl_key == None:
+    if ssl_cert is None and ssl_key is None:
         # skip setting up ssl
         ssl_context = None
     else:
@@ -172,7 +172,7 @@ def find_null_cells(session, keyspace, table, key_column, value_column):
                               column=value_column)
     logging.debug("Executing: {}".format(sql))
     result = session.execute(sql)
-    result_list = [r for r in result if getattr(r, value_column) == None]
+    result_list = [r for r in result if getattr(r, value_column) is None]
 
 
 def batch_sql_query(sql_statement, key_name, key_list, dry_run=False):
@@ -221,7 +221,6 @@ def seconds_to_human(seconds):
 
 
 def human_time(seconds):
-
     hours, minutes, seconds = seconds_to_human(seconds)
 
     if hours:
@@ -244,7 +243,8 @@ def sql_query(sql_statement, key_column, result_list, failcount, sql_list,
             logging.warning("Aborting query on request.")
             return
         (min, max) = sql_list.pop()
-        sql_base_template = "{sql_statement} where token({key_column}) >= {min} and token({key_column}) < {max}"
+        sql_base_template = "{sql_statement} where token({key_column}) " \
+                            ">= {min} and token({key_column}) < {max}"
         if filter_string:
             sql_base_template += " and {}".format(filter_string)
         sql = sql_base_template.format(sql_statement=sql_statement,
@@ -260,8 +260,9 @@ def sql_query(sql_statement, key_column, result_list, failcount, sql_list,
         except Exception as e:
             failcount += 1
             logging.warning(
-                "Got Cassandra exception: {msg} when running query: {sql}".
-                format(sql=sql, msg=e))
+                            "Got Cassandra exception: "
+                            "{msg} when running query: {sql}"
+                            .format(sql=sql, msg=e))
 
 
 def distributed_sql_query(sql_statement,
@@ -283,7 +284,8 @@ def distributed_sql_query(sql_statement,
     logging.debug("Preparing splits...")
     while i <= tr.max - 1:
         i_max = i + pow(10, split)
-        if i_max > tr.max: i_max = tr.max  # don't go higher than max_token
+        if i_max > tr.max:
+            i_max = tr.max  # don't go higher than max_token
         sql_list.append((i, i_max))
         i = i_max
     logging.debug("sql list length is {}".format(len(sql_list)))
@@ -385,10 +387,11 @@ def update_rows(session,
             update_list.append(getattr(row, key))
     logging.info("Updating {} rows".format(len(update_list)))
     logging.info(
-        "Updating rows and setting {update_key} to new value {update_value} where filtering string is: {filter_string}"
-        .format(update_key=update_key,
-                update_value=update_value,
-                filter_string=filter_string))
+                "Updating rows and setting {update_key} to new value "
+                "{update_value} where filtering string is: {filter_string}"
+                .format(update_key=update_key,
+                        update_value=update_value,
+                        filter_string=filter_string))
 
     # surround update value with quotes in case it is a string,
     # but don't do it if it looks like a string
@@ -398,7 +401,8 @@ def update_rows(session,
         if update_value.lower() not in booleans:
             update_value = "'{}'".format(update_value)
 
-    sql_template = "update {keyspace}.{table} set {update_key} = {update_value}"
+    sql_template = "update {keyspace}.{table} set "\
+                   "{update_key} = {update_value}"
     sql_statement = sql_template.format(keyspace=keyspace,
                                         table=table,
                                         update_key=update_key,
@@ -514,7 +518,7 @@ def find_wide_partitions(session,
     count.sort(key=lambda x: x.value, reverse=True)
     # now that we know the most highly loaded splits, we can drill down
     most_loaded_split = count[0]
-    tr = Token_range(most_loaded_split.min, most_loaded_split.max)
+    token_range = Token_range(most_loaded_split.min, most_loaded_split.max)
     most_loaded_split_count = get_rows_count(session,
                                              keyspace,
                                              table,
@@ -522,11 +526,11 @@ def find_wide_partitions(session,
                                              split=14,
                                              filter_string=None,
                                              aggregate=False,
-                                             token_range=tr)
+                                             token_range=token_range)
     most_loaded_split_count.sort(key=lambda x: x.value, reverse=True)
 
-    tr = Token_range(most_loaded_split_count[0].min,
-                     most_loaded_split_count[0].max)
+    token_range = Token_range(most_loaded_split_count[0].min,
+                              most_loaded_split_count[0].max)
 
     most_loaded_split_count2 = get_rows_count(session,
                                               keyspace,
@@ -535,11 +539,11 @@ def find_wide_partitions(session,
                                               split=12,
                                               filter_string=None,
                                               aggregate=False,
-                                              token_range=tr)
+                                              token_range=token_range)
     most_loaded_split_count2.sort(key=lambda x: x.value, reverse=True)
 
-    tr = Token_range(most_loaded_split_count2[0].min,
-                     most_loaded_split_count2[0].max)
+    token_range = Token_range(most_loaded_split_count2[0].min,
+                              most_loaded_split_count2[0].max)
 
     most_loaded_split_count3 = get_rows_count(session,
                                               keyspace,
@@ -548,12 +552,12 @@ def find_wide_partitions(session,
                                               split=10,
                                               filter_string=None,
                                               aggregate=False,
-                                              token_range=tr)
+                                              token_range=token_range)
     most_loaded_split_count3.sort(key=lambda x: x.value, reverse=True)
 
     # narrow it down to 100 million split size
-    tr = Token_range(most_loaded_split_count3[0].min,
-                     most_loaded_split_count3[0].max)
+    token_range = Token_range(most_loaded_split_count3[0].min,
+                              most_loaded_split_count3[0].max)
 
     most_loaded_split_count4 = get_rows_count(session,
                                               keyspace,
@@ -562,12 +566,12 @@ def find_wide_partitions(session,
                                               split=8,
                                               filter_string=None,
                                               aggregate=False,
-                                              token_range=tr)
+                                              token_range=token_range)
     most_loaded_split_count4.sort(key=lambda x: x.value, reverse=True)
 
     # narrow it down to 1 million split size
-    tr = Token_range(most_loaded_split_count4[0].min,
-                     most_loaded_split_count4[0].max)
+    token_range = Token_range(most_loaded_split_count4[0].min,
+                              most_loaded_split_count4[0].max)
 
     most_loaded_split_count5 = get_rows_count(session,
                                               keyspace,
@@ -576,12 +580,12 @@ def find_wide_partitions(session,
                                               split=6,
                                               filter_string=None,
                                               aggregate=False,
-                                              token_range=tr)
+                                              token_range=token_range)
     most_loaded_split_count5.sort(key=lambda x: x.value, reverse=True)
 
     # narrow it down to 1 thousand split size
-    tr = Token_range(most_loaded_split_count5[0].min,
-                     most_loaded_split_count5[0].max)
+    token_range = Token_range(most_loaded_split_count5[0].min,
+                              most_loaded_split_count5[0].max)
 
     most_loaded_split_count6 = get_rows_count(session,
                                               keyspace,
@@ -590,12 +594,12 @@ def find_wide_partitions(session,
                                               split=3,
                                               filter_string=None,
                                               aggregate=False,
-                                              token_range=tr)
+                                              token_range=token_range)
     most_loaded_split_count6.sort(key=lambda x: x.value, reverse=True)
 
     # narrow it down to 10 split size
-    tr = Token_range(most_loaded_split_count6[0].min,
-                     most_loaded_split_count6[0].max)
+    token_range = Token_range(most_loaded_split_count6[0].min,
+                              most_loaded_split_count6[0].max)
 
     most_loaded_split_count7 = get_rows_count(session,
                                               keyspace,
@@ -604,7 +608,7 @@ def find_wide_partitions(session,
                                               split=1,
                                               filter_string=None,
                                               aggregate=False,
-                                              token_range=tr)
+                                              token_range=token_range)
     most_loaded_split_count7.sort(key=lambda x: x.value, reverse=True)
 
     print(most_loaded_split)
