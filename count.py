@@ -202,6 +202,32 @@ def batch_sql_query(sql_statement, key_name, key_list, dry_run=False):
             logging.debug(result)
             time.sleep(0.1)
 
+def batch_delete(sql_statement, delete_list, dry_run=False):
+    """Run a query on the specifies list of primary keys."""
+
+    for dictionary in delete_list:
+        sql = "{sql_statement} where ".format(sql_statement=sql_statement)
+
+        andcount = 0
+        for key in dictionary:
+            value = dictionary[key]
+            # cassandra is timezone aware, however the response that we would have received
+            # previously does not contain timezone, so we need to add it manually
+            if isinstance(value, datetime.datetime):
+                value = value.replace(tzinfo=datetime.timezone.utc)
+            value = "'{}'".format(value)
+            sql += "{key_name} = {key}".format(key_name=key, key=value)
+            if andcount < 1:
+                andcount += 1
+                sql += " and "
+
+        logging.debug("Executing: {}".format(sql))
+        if dry_run:
+            logging.info("Would execute: {}".format(sql))
+        else:
+            result = session.execute(sql)
+            logging.debug(result)
+            time.sleep(0.1)
 
 def seconds_to_human(seconds):
     # default values
@@ -351,15 +377,36 @@ def reductor(result_set):
     return result_list
 
 
-def delete_rows(session, keyspace, table, key, split, filter_string):
+def delete_rows(session, keyspace, table, key, split, filter_string, extra_key=None):
     session.execute("use {}".format(keyspace))
+    rows = get_rows(session, keyspace, table, key, split, value_column=None, filter_string=filter_string, extra_key=extra_key)
+    delete_list = []
+    for row in rows:
+        if extra_key:
+            delete_list.append({
+                key: getattr(row, key),
+                extra_key: getattr(row, extra_key)
+            })  # use tuple of key, extra_key
+        else:
+            delete_list.append(getattr(row, key))
+    logging.info("Deleting {} rows".format(len(delete_list)))
+
     sql_template = "delete from {keyspace}.{table}"
-    sql_statement = sql_template.format(keyspace=keyspace, table=table)
-    result = distributed_sql_query(sql_statement,
-                                   key_column=key,
-                                   split=split,
-                                   filter_string=filter_string)
-    return (reductor(result))
+    sql_statement = sql_template.format(keyspace=keyspace,
+                                        table=table)
+    logging.info(sql_statement)
+
+    while True:
+        response = input(
+            "Are you sure you want to continue? (y/n)").lower().strip()
+        if response == "y":
+            break
+        elif response == "n":
+            logging.warning("Aborting upon user request")
+            return 1
+    result = batch_delete(sql_statement, delete_list, False)
+    logging.info("Operation complete.")
+
 
 
 def update_rows(session,
@@ -664,7 +711,7 @@ if __name__ == "__main__":
                     args.filter_string, args.extra_key)
     elif args.action == "delete-rows":
         delete_rows(session, args.keyspace, args.table, args.key, args.split,
-                    args.filter_string)
+                    args.filter_string, args.extra_key)
 
     else:
         # this won't be accepted by argparse anyways
