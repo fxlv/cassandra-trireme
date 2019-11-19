@@ -237,20 +237,24 @@ def human_time(seconds):
 
 
 def sql_query(sql_statement, key_column, result_list, failcount, sql_list,
-              filter_string, kill_queue):
+              filter_string, kill_queue, extra_key):
     while len(sql_list) > 0:
         if kill_queue.qsize() > 0:
             logging.warning("Aborting query on request.")
             return
         (min, max) = sql_list.pop()
-        sql_base_template = "{sql_statement} where token({key_column}) " \
+        if extra_key:
+            sql_base_template = "{sql_statement} where token({key_column}, {extra_key}) " \
+                                ">= {min} and token({key_column}, {extra_key}) < {max}"
+        else:
+            sql_base_template = "{sql_statement} where token({key_column}) " \
                             ">= {min} and token({key_column}) < {max}"
         if filter_string:
             sql_base_template += " and {}".format(filter_string)
         sql = sql_base_template.format(sql_statement=sql_statement,
                                        min=min,
                                        max=max,
-                                       key_column=key_column)
+                                       key_column=key_column, extra_key=extra_key)
         try:
             if result_list.qsize() % 100 == 0:
                 logging.debug("Executing: {}".format(sql))
@@ -269,7 +273,7 @@ def distributed_sql_query(sql_statement,
                           key_column,
                           split,
                           filter_string,
-                          token_range=None):
+                          token_range=None, extra_key=None):
     start_time = datetime.datetime.now()
     sql_list = []
     result_list = queue.Queue()
@@ -300,7 +304,7 @@ def distributed_sql_query(sql_statement,
                 thread = threading.Thread(
                     target=sql_query,
                     args=(sql_statement, key_column, result_list, failcount,
-                          sql_list, filter_string, kill_queue))
+                          sql_list, filter_string, kill_queue, extra_key))
                 thread.start()
                 logging.debug("Started thread {}".format(thread))
                 process_queue.put(thread)
@@ -449,7 +453,7 @@ def get_rows(session,
     result = distributed_sql_query(sql_statement,
                                    key_column=key,
                                    split=split,
-                                   filter_string=filter_string)
+                                   filter_string=filter_string, extra_key=extra_key)
     return (reductor(result))
 
 
@@ -493,9 +497,9 @@ def print_rows(session,
                key,
                split,
                value_column=None,
-               filter_string=None):
+               filter_string=None, extra_key=None):
     rows = get_rows(session, keyspace, table, key, split, value_column,
-                    filter_string)
+                    filter_string, extra_key)
     for row in rows:
         print(row)
 
@@ -650,7 +654,7 @@ if __name__ == "__main__":
                          args.split, args.filter_string)
     elif args.action == "print-rows":
         print_rows(session, args.keyspace, args.table, args.key, args.split,
-                   args.value_column, args.filter_string)
+                   args.value_column, args.filter_string, args.extra_key)
     elif args.action == "find-wide-partitions":
         find_wide_partitions(session, args.keyspace, args.table, args.key,
                              args.split, args.value_column, args.filter_string)
