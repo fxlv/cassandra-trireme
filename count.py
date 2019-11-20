@@ -32,6 +32,9 @@ class Result:
         return "Result(min: {}, max: {}, value: {})".format(
             self.min, self.max, self.value)
 
+class Settings:
+    def __init__(self):
+        pass
 
 class Token_range:
     def __init__(self, min, max):
@@ -106,6 +109,12 @@ def parse_user_args():
     parser.add_argument("--debug",
                         action="store_true",
                         help="Enable DEBUG logging")
+
+    parser.add_argument("--min-token", type=int,
+                       help="Min token")
+
+    parser.add_argument("--max-token", type=int,
+                       help="Max token")
     args = parser.parse_args()
     return args
 
@@ -305,10 +314,7 @@ def distributed_sql_query(sql_statement,
     result_list = queue.Queue()
     failcount = 0
     thread_count = 15
-    if not token_range:
-        tr = Token_range(default_min_token, default_max_token)
-    else:
-        tr = token_range
+    tr = token_range
     # calculate token ranges for distributing the query
     i = tr.min
     logging.debug("Preparing splits...")
@@ -377,11 +383,15 @@ def reductor(result_set):
     return result_list
 
 
-def delete_rows(session, keyspace, table, key, split, filter_string, extra_key=None):
+def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_key=None):
     session.execute("use {}".format(keyspace))
-    rows = get_rows(session, keyspace, table, key, split, value_column=None, filter_string=filter_string, extra_key=extra_key)
+    rows = get_rows(session, keyspace, table, key, split, tr, value_column=None, filter_string=filter_string, extra_key=extra_key)
     delete_list = []
+    logging.debug("Total row count: {}".format(len(rows)))
+    logging.debug("Token range used: min={}, max={}".format(tr.min, tr.max))
     for row in rows:
+        logging.debug("ROW: {}".format(row))
+
         if extra_key:
             delete_list.append({
                 key: getattr(row, key),
@@ -477,6 +487,7 @@ def get_rows(session,
              table,
              key,
              split,
+             tr,
              value_column=None,
              filter_string=None,
              extra_key=None):
@@ -500,7 +511,7 @@ def get_rows(session,
     result = distributed_sql_query(sql_statement,
                                    key_column=key,
                                    split=split,
-                                   filter_string=filter_string, extra_key=extra_key)
+                                   filter_string=filter_string, token_range=tr, extra_key=extra_key)
     return (reductor(result))
 
 
@@ -694,6 +705,11 @@ if __name__ == "__main__":
                                     args.password, args.ssl_cert, args.ssl_key,
                                     args.ssl_v1)
 
+    if args.min_token and args.max_token:
+        tr = Token_range(args.min_token, args.max_token)
+    else:
+        tr = Token_range(default_min_token, default_max_token)
+
     if args.action == "find-nulls":
         find_null_cells(session, args.keyspace, args.table, "id", "comment")
     elif args.action == "count-rows":
@@ -711,7 +727,7 @@ if __name__ == "__main__":
                     args.filter_string, args.extra_key)
     elif args.action == "delete-rows":
         delete_rows(session, args.keyspace, args.table, args.key, args.split,
-                    args.filter_string, args.extra_key)
+                    args.filter_string, tr, args.extra_key)
 
     else:
         # this won't be accepted by argparse anyways
