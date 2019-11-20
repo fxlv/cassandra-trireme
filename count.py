@@ -13,6 +13,7 @@ import queue
 import sys
 import threading
 import time
+import platform
 from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
 
 from cassandra.auth import PlainTextAuthProvider
@@ -127,22 +128,44 @@ def get_cassandra_session(host,
                           ssl_key,
                           ssl_v1=False):
     """Establish Cassandra connection and return session object."""
+
+    auth_provider = PlainTextAuthProvider(username=user, password=password)
+
+    py_version = platform.python_version_tuple()
+
+
     if ssl_cert is None and ssl_key is None:
         # skip setting up ssl
         ssl_context = None
+        cluster = Cluster([host],
+                          port=port,
+                          auth_provider=auth_provider)
     else:
         if ssl_v1:
             tls_version = PROTOCOL_TLSv1
         else:
             tls_version = PROTOCOL_TLSv1_2
-        ssl_context = SSLContext(tls_version)
-        ssl_context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
 
-    auth_provider = PlainTextAuthProvider(username=user, password=password)
-    cluster = Cluster([host],
-                      port=port,
-                      ssl_context=ssl_context,
-                      auth_provider=auth_provider)
+        if int(py_version[0]) == 3 and int(py_version[1]) > 6:
+            ssl_context = SSLContext(tls_version)
+            ssl_context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+            cluster = Cluster([host],
+                              port=port,
+                              ssl_context=ssl_context,
+                              auth_provider=auth_provider)
+        else:
+            ssl_options = {'certfile': ssl_cert,
+                           'keyfile': ssl_key,
+                           'ssl_version': PROTOCOL_TLSv1_2}
+            cluster = Cluster([host],
+                              port=port,
+                              ssl_options=ssl_options,
+                              auth_provider=auth_provider)
+
+
+
+
+
     try:
         session = cluster.connect()
     except Exception as e:
@@ -292,7 +315,7 @@ def sql_query(sql_statement, key_column, result_list, failcount, sql_list,
                                        key_column=key_column, extra_key=extra_key)
         try:
             if result_list.qsize() % 100 == 0:
-                logging.debug("Executing: {}".format(sql))
+                logging.info("Executing: {}".format(sql))
             result = session.execute(sql)
             r = Result(min, max, result)
             result_list.put(r)
@@ -317,14 +340,14 @@ def distributed_sql_query(sql_statement,
     tr = token_range
     # calculate token ranges for distributing the query
     i = tr.min
-    logging.debug("Preparing splits...")
+    logging.info("Preparing splits...")
     while i <= tr.max - 1:
         i_max = i + pow(10, split)
         if i_max > tr.max:
             i_max = tr.max  # don't go higher than max_token
         sql_list.append((i, i_max))
         i = i_max
-    logging.debug("sql list length is {}".format(len(sql_list)))
+    logging.info("sql list length is {}".format(len(sql_list)))
     time.sleep(1)
     process_queue = queue.Queue()
     kill_queue = queue.Queue()  # TODO: change this to an event?
@@ -338,24 +361,24 @@ def distributed_sql_query(sql_statement,
                     args=(sql_statement, key_column, result_list, failcount,
                           sql_list, filter_string, kill_queue, extra_key))
                 thread.start()
-                logging.debug("Started thread {}".format(thread))
+                logging.info("Started thread {}".format(thread))
                 process_queue.put(thread)
             else:
-                logging.debug("Max process count reached")
-                logging.debug("{} more queries remaining".format(
+                logging.info("Max process count reached")
+                logging.info("{} more queries remaining".format(
                     len(sql_list)))
                 res_count = result_list.qsize()
-                logging.debug("{} results so far".format(res_count))
+                logging.info("{} results so far".format(res_count))
                 n = datetime.datetime.now()
                 delta = n - start_time
                 elapsed_time = delta.total_seconds()
-                logging.debug("Elapsed time: {}.".format(
+                logging.info("Elapsed time: {}.".format(
                     human_time(elapsed_time)))
                 if res_count > 0:
                     result_per_sec = res_count / elapsed_time
-                    logging.debug("{} results / s".format(result_per_sec))
+                    logging.info("{} results / s".format(result_per_sec))
                 time.sleep(10)
-        logging.debug("No more work left, waiting for all threads to stop.")
+        logging.info("No more work left, waiting for all threads to stop.")
         # TODO: maybe instead send the kill pill
         #  or check thread liveliness in some other way
         # instead of just blindly waiting for a sec
@@ -364,8 +387,8 @@ def distributed_sql_query(sql_statement,
         logging.warning("Ctrl+c pressed, asking all threads to stop.")
         kill_queue.put(0)
         time.sleep(2)
-        logging.debug("{} more queries remaining".format(len(sql_list)))
-        logging.debug("{} results so far".format(res_count))
+        logging.info("{} more queries remaining".format(len(sql_list)))
+        logging.info("{} results so far".format(res_count))
 
     if failcount > 0:
         logging.warning(
@@ -387,10 +410,10 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     session.execute("use {}".format(keyspace))
     rows = get_rows(session, keyspace, table, key, split, tr, value_column=None, filter_string=filter_string, extra_key=extra_key)
     delete_list = []
-    logging.debug("Total row count: {}".format(len(rows)))
-    logging.debug("Token range used: min={}, max={}".format(tr.min, tr.max))
+    logging.info("Total row count: {}".format(len(rows)))
+    logging.info("Token range used: min={}, max={}".format(tr.min, tr.max))
     for row in rows:
-        logging.debug("ROW: {}".format(row))
+        logging.info("ROW: {}".format(row))
 
         if extra_key:
             delete_list.append({
@@ -508,6 +531,7 @@ def get_rows(session,
     sql_statement = sql_template.format(select_values=select_values,
                                         keyspace=keyspace,
                                         table=table)
+    logging.info("Running distributed query: '{sql}'".format(sql=sql_statement))
     result = distributed_sql_query(sql_statement,
                                    key_column=key,
                                    split=split,
@@ -692,6 +716,11 @@ def print_rows_count(session, keyspace, table, key, split, filter_string=None):
 
 
 if __name__ == "__main__":
+
+    py_version = platform.python_version_tuple()
+    if int(py_version[0]) < 3:
+        logging.info("Python 3.6 or newer required. 3.7 recommended.")
+        sys.exit(1)
 
     args = parse_user_args()
 
