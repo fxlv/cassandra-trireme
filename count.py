@@ -255,14 +255,14 @@ def process_reaper(process_queue):
             logging.debug("Process {} is still running, putting back into queue".format(process))
             process_queue.put(process)
         else:
-            logging.info("Reaping process {}".format(process))
+            logging.debug("Reaping process {}".format(process))
 
 
-def deleter(delete_queue, delete_counter_queue):
+def deleter(delete_queue, delete_counter_queue, delete_process_queue):
 
-    thread_count = 2
+    thread_count = 10
 
-    delete_process_queue = queue.Queue()
+
     while True:
         if delete_queue.qsize == 0:
             logging.debug("Deleter spinning.")
@@ -272,7 +272,7 @@ def deleter(delete_queue, delete_counter_queue):
                 sql_statement = delete_queue.get()
                 thread = threading.Thread(target=execute_statement,args=(sql_statement,))
                 thread.start()
-                logging.info("Started delete sub-thread {}".format(thread))
+                logging.debug("Started delete sub-thread {}".format(thread))
                 delete_process_queue.put(thread)
                 delete_counter_queue.put(0)
             else:
@@ -320,32 +320,36 @@ def sql_query_q(getter_counter,sql_statement, key_column, result_list, failcount
         if kill_queue.qsize() > 0:
             logging.warning("Aborting query on request.")
             return
-        (min, max) = split_queue.get()
-        if extra_key:
-            sql_base_template = "{sql_statement} where token({key_column}, {extra_key}) " \
-                                ">= {min} and token({key_column}, {extra_key}) < {max}"
+        if split_queue.qsize() >0:
+            (min, max) = split_queue.get()
+            if extra_key:
+                sql_base_template = "{sql_statement} where token({key_column}, {extra_key}) " \
+                                    ">= {min} and token({key_column}, {extra_key}) < {max}"
+            else:
+                sql_base_template = "{sql_statement} where token({key_column}) " \
+                                ">= {min} and token({key_column}) < {max}"
+            if filter_string:
+                sql_base_template += " and {}".format(filter_string)
+            sql = sql_base_template.format(sql_statement=sql_statement,
+                                           min=min,
+                                           max=max,
+                                           key_column=key_column, extra_key=extra_key)
+            try:
+                if result_list.qsize() % 100 == 0:
+                    logging.debug("Executing: {}".format(sql))
+                result = session.execute(sql)
+                getter_counter.put(0)
+                r = Result(min, max, result)
+                result_list.put(r)
+            except Exception as e:
+                failcount += 1
+                logging.warning(
+                                "Got Cassandra exception: "
+                                "{msg} when running query: {sql}"
+                                .format(sql=sql, msg=e))
         else:
-            sql_base_template = "{sql_statement} where token({key_column}) " \
-                            ">= {min} and token({key_column}) < {max}"
-        if filter_string:
-            sql_base_template += " and {}".format(filter_string)
-        sql = sql_base_template.format(sql_statement=sql_statement,
-                                       min=min,
-                                       max=max,
-                                       key_column=key_column, extra_key=extra_key)
-        try:
-            if result_list.qsize() % 100 == 0:
-                logging.debug("Executing: {}".format(sql))
-            result = session.execute(sql)
-            getter_counter.put(0)
-            r = Result(min, max, result)
-            result_list.put(r)
-        except Exception as e:
-            failcount += 1
-            logging.warning(
-                            "Got Cassandra exception: "
-                            "{msg} when running query: {sql}"
-                            .format(sql=sql, msg=e))
+            logging.debug("Stopping getter thread due to zero split queue size.")
+            break
 
 def sql_query(sql_statement, key_column, result_list, failcount, sql_list,
               filter_string, kill_queue, extra_key):
@@ -403,7 +407,7 @@ def splitter(tr, split, split_queue):
             i = i_max
     logging.info("Splitter is done. All splits created")
 
-def distributed_sql_query(getter_counter,result_queue,sql_statement,
+def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_statement,
                           key_column,
                           split_queue,
                           filter_string,
@@ -412,7 +416,6 @@ def distributed_sql_query(getter_counter,result_queue,sql_statement,
     result_list = result_queue
     failcount = 0
     thread_count = 15
-    process_queue = queue.Queue()
     kill_queue = queue.Queue()  # TODO: change this to an event?
 
     backoff_counter = 0
@@ -423,14 +426,14 @@ def distributed_sql_query(getter_counter,result_queue,sql_statement,
                 if backoff_counter >0:
                     backoff_counter =0 # reset backoff counter
 
-                if process_queue.qsize() < thread_count:
+                if get_process_queue.qsize() < thread_count:
                     thread = threading.Thread(
                         target=sql_query_q,
                         args=(getter_counter,sql_statement, key_column, result_list, failcount,
                               split_queue, filter_string, kill_queue, extra_key))
                     thread.start()
                     logging.info("Started thread {}".format(thread))
-                    process_queue.put(thread)
+                    get_process_queue.put(thread)
                 else:
                     logging.info("Max process count reached")
                     logging.info("{} more queries remaining".format(split_queue.qsize()))
@@ -449,6 +452,8 @@ def distributed_sql_query(getter_counter,result_queue,sql_statement,
                 backoff_counter += 1
                 logging.info("No splits in the split queue. Will sleep {} sec".format(backoff_counter))
                 time.sleep(backoff_counter)
+                process_reaper(get_process_queue)
+
     except KeyboardInterrupt:
         logging.warning("Ctrl+c pressed, asking all threads to stop.")
         kill_queue.put(0)
@@ -530,6 +535,8 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     delete_preparer_queue = queue.Queue()
     delete_queue = queue.Queue()
     delete_counter_queue = queue.Queue()
+    delete_process_queue = queue.Queue()
+    get_process_queue = queue.Queue()
 
     #
     # Flow:
@@ -544,7 +551,7 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     splitter_thread.start()
 
     # start getter
-    getter_thread = threading.Thread(target=get_rows, kwargs=dict(getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
+    getter_thread = threading.Thread(target=get_rows, kwargs=dict(get_process_queue=get_process_queue,getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
     getter_thread.start()
 
     # reducer
@@ -556,7 +563,7 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     delete_preparer_thread.start()
 
     # and the actual deleter
-    deleter_thread = threading.Thread(target=deleter, args=(delete_queue, delete_counter_queue))
+    deleter_thread = threading.Thread(target=deleter, args=(delete_queue, delete_counter_queue, delete_process_queue))
     deleter_thread.start()
 
 
@@ -570,6 +577,10 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
         logging.info("Results:")
         logging.info("Split progress: {}/{}".format(getter_counter.qsize(), predicted_split_count))
         logging.info("Delete counter: {}".format(delete_counter_queue.qsize()))
+        logging.info("Thread status:")
+        logging.info("Active getter threads: {}".format(get_process_queue.qsize()))
+        logging.info("Active deleter threads: {}".format(delete_process_queue.qsize()))
+
 
 
 
@@ -645,7 +656,7 @@ def update_rows(session,
     logging.info("Operation complete.")
 
 
-def get_rows(getter_counter,result_queue,session, keyspace, table,
+def get_rows(get_process_queue,getter_counter,result_queue,session, keyspace, table,
              key, split_queue,
              value_column=None, filter_string=None, extra_key=None):
 
@@ -667,7 +678,7 @@ def get_rows(getter_counter,result_queue,session, keyspace, table,
                                         keyspace=keyspace,
                                         table=table)
     logging.info("Running distributed query: '{sql}'".format(sql=sql_statement))
-    result = distributed_sql_query(getter_counter,result_queue,sql_statement,
+    result = distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_statement,
                                    key_column=key,
                                    split_queue=split_queue,
                                    filter_string=filter_string, extra_key=extra_key)
