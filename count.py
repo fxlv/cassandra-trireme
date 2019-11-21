@@ -244,10 +244,10 @@ def execute_statement(sql_statement):
 def process_reaper(process_queue):
     max_attempts = 10
     current = 0
-    logging.info("Process reaper: there are {} processes in the queue".format(process_queue.qsize()))
+    logging.debug("Process reaper: there are {} processes in the queue".format(process_queue.qsize()))
     while process_queue.qsize() > 0:
         if current == max_attempts:
-            logging.info("Process reaper exiting.")
+            logging.debug("Process reaper exiting.")
             break
         current +=1
         process = process_queue.get()
@@ -276,8 +276,10 @@ def deleter(delete_queue, delete_counter_queue):
                 delete_process_queue.put(thread)
                 delete_counter_queue.put(0)
             else:
-                logging.info("Max process count {} reached for the deleter".format(thread_count))
-                logging.info("{} more queries remaining".format(delete_queue.qsize() ))
+                if delete_queue.qsize() % 10 == 0:
+                    logging.info("Max process count {} reached for the deleter".format(thread_count))
+                    logging.info("{} more queries remaining".format(delete_queue.qsize() ))
+                time.sleep(1)
                 process_reaper(delete_process_queue)
 
 def seconds_to_human(seconds):
