@@ -236,7 +236,7 @@ def batch_sql_query(sql_statement, key_name, key_list, dry_run=False):
 
 
 def execute_statement(sql_statement):
-    logging.info("Deleting: {}".format(sql_statement))
+    logging.debug("Deleting: {}".format(sql_statement))
     result = session.execute(sql_statement)
     return result
 
