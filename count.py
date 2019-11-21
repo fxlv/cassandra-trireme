@@ -234,9 +234,66 @@ def batch_sql_query(sql_statement, key_name, key_list, dry_run=False):
             logging.debug(result)
             time.sleep(0.1)
 
-def batch_delete(sql_statement, delete_list, dry_run=False):
-    """Run a query on the specifies list of primary keys."""
 
+def execute_statement(sql_statement):
+    result = session.execute(sql_statement)
+    logging.info("Deleting: {}".format(sql_statement))
+    return result
+
+
+def process_reaper(process_queue):
+    max_attempts = 5
+    current = 0
+    while process_queue.qsize() > 0:
+        current +=1
+        process = process_queue.get()
+        if process.is_alive():
+            logging.info("Process {} is still running, putting back into queue".format(process))
+            process_queue.put(process)
+        else:
+            logging.info("Reaping process {} as it is done.".format(process))
+
+def threaded_batch_delete(sql_statement_list):
+
+    thread_count = 5
+    start_time = datetime.datetime.now()
+    sql_list = []
+    sql_queue = queue.Queue()
+    logging.info("Preparing SQL queue")
+    for sql in sql_statement_list:
+        sql_queue.put(sql)
+    logging.info("SQL queue prepared")
+
+    process_queue = queue.Queue()
+    kill_queue = queue.Queue()  # TODO: change this to an event?
+    while sql_queue.qsize() > 0:
+        if process_queue.qsize() < thread_count:
+            sql_statement = sql_queue.get()
+            thread = threading.Thread(target=execute_statement,args=(sql_statement,))
+            thread.start()
+            logging.info("Started thread {}".format(thread))
+            process_queue.put(thread)
+        else:
+            logging.info("Max process count reached")
+            logging.info("{} more queries remaining".format(sql_queue.qsize() ))
+            process_reaper(process_queue)
+            n = datetime.datetime.now()
+            delta = n - start_time
+            elapsed_time = delta.total_seconds()
+            logging.info("Elapsed time: {}.".format(
+               human_time(elapsed_time)))
+
+            time.sleep(5)
+    logging.info("No more work left for deletion, waiting for all threads to stop.")
+    # TODO: maybe instead send the kill pill
+    #  or check thread liveliness in some other way
+    # instead of just blindly waiting for a sec
+    time.sleep(1)
+
+def batch_delete_prepare(sql_statement, delete_list, dry_run=False):
+    """Return a list of prepared SQL statements for deleting"""
+
+    delete_statements_list = []
     for dictionary in delete_list:
         sql = "{sql_statement} where ".format(sql_statement=sql_statement)
 
@@ -252,14 +309,11 @@ def batch_delete(sql_statement, delete_list, dry_run=False):
             if andcount < 1:
                 andcount += 1
                 sql += " and "
+        delete_statements_list.append(sql)
+    return delete_statements_list
 
-        logging.debug("Executing: {}".format(sql))
-        if dry_run:
-            logging.info("Would execute: {}".format(sql))
-        else:
-            result = session.execute(sql)
-            logging.debug(result)
-            time.sleep(0.1)
+
+
 
 def seconds_to_human(seconds):
     # default values
@@ -315,7 +369,7 @@ def sql_query(sql_statement, key_column, result_list, failcount, sql_list,
                                        key_column=key_column, extra_key=extra_key)
         try:
             if result_list.qsize() % 100 == 0:
-                logging.info("Executing: {}".format(sql))
+                logging.debug("Executing: {}".format(sql))
             result = session.execute(sql)
             r = Result(min, max, result)
             result_list.put(r)
@@ -340,13 +394,21 @@ def distributed_sql_query(sql_statement,
     tr = token_range
     # calculate token ranges for distributing the query
     i = tr.min
-    logging.info("Preparing splits...")
+    logging.info("Preparing splits with split size {}".format(split))
+    # how many splits will there be?
+    predicted_split_count = (tr.max - tr.min) / pow(10, split)
+    logging.info("Predicted split count is {} splits".format(predicted_split_count))
+    one_percent = predicted_split_count / 100
     while i <= tr.max - 1:
         i_max = i + pow(10, split)
         if i_max > tr.max:
             i_max = tr.max  # don't go higher than max_token
         sql_list.append((i, i_max))
         i = i_max
+        if len(sql_list) > one_percent:
+            if len(sql_list) % one_percent == 0:
+                percent_done = len(sql_list) / one_percent
+                logging.info("{}% splits prepared".format(percent_done))
     logging.info("sql list length is {}".format(len(sql_list)))
     time.sleep(1)
     process_queue = queue.Queue()
@@ -437,7 +499,8 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
         elif response == "n":
             logging.warning("Aborting upon user request")
             return 1
-    result = batch_delete(sql_statement, delete_list, False)
+    delete_sql_statements = batch_delete_prepare(sql_statement, delete_list, False)
+    threaded_batch_delete(delete_sql_statements)
     logging.info("Operation complete.")
 
 
