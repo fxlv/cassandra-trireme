@@ -267,6 +267,23 @@ def process_reaper(process_queue):
         else:
             logging.debug("Reaping process {}".format(process))
 
+def delete_worker(delete_queue, delete_counter_queue):
+    backoff_timer = 0
+    if delete_queue.qsize() == 0:
+        backoff_timer +=1
+        logging.debug("Delete worker idle. Sleeping for {} sec".format(backoff_timer))
+        time.sleep(backoff_timer)
+    else:
+        backoff_timer = 0
+        if delete_queue.qsize() > 0:
+            logging.debug("Doing delete run")
+            try:
+                sql_statement = delete_queue.get(block=True,timeout=1)
+                execute_statement(sql_statement)
+                delete_counter_queue.put(0)
+            except queue.Empty:
+                logging.debug("Empty delete queue!")
+
 
 def deleter(delete_queue, delete_counter_queue, delete_process_queue):
 
@@ -274,21 +291,20 @@ def deleter(delete_queue, delete_counter_queue, delete_process_queue):
 
 
     while True:
-        if delete_queue.qsize == 0:
+        if delete_queue.qsize() == 0:
             logging.debug("Deleter spinning.")
+            process_reaper(delete_process_queue)
             time.sleep(2)
         else:
             if delete_process_queue.qsize() < thread_count:
-                sql_statement = delete_queue.get()
-                thread = threading.Thread(target=execute_statement,args=(sql_statement,))
+                thread = threading.Thread(target=delete_worker,args=(delete_queue, delete_counter_queue))
                 thread.start()
                 logging.debug("Started delete sub-thread {}".format(thread))
                 delete_process_queue.put(thread)
-                delete_counter_queue.put(0)
             else:
                 if delete_queue.qsize() % 10 == 0:
-                    logging.info("Max process count {} reached for the deleter".format(thread_count))
-                    logging.info("{} more queries remaining".format(delete_queue.qsize() ))
+                    logging.debug("Max process count {} reached for the deleter".format(thread_count))
+                    logging.debug("{} more queries remaining".format(delete_queue.qsize() ))
                 time.sleep(1)
                 process_reaper(delete_process_queue)
 
