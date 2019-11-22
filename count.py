@@ -268,21 +268,26 @@ def process_reaper(process_queue):
             logging.debug("Reaping process {}".format(process))
 
 def delete_worker(delete_queue, delete_counter_queue):
+
     backoff_timer = 0
-    if delete_queue.qsize() == 0:
-        backoff_timer +=1
-        logging.debug("Delete worker idle. Sleeping for {} sec".format(backoff_timer))
-        time.sleep(backoff_timer)
-    else:
-        backoff_timer = 0
-        if delete_queue.qsize() > 0:
-            logging.debug("Doing delete run")
-            try:
-                sql_statement = delete_queue.get(block=True,timeout=1)
-                execute_statement(sql_statement)
-                delete_counter_queue.put(0)
-            except queue.Empty:
-                logging.debug("Empty delete queue!")
+    while True:
+        if delete_queue.qsize() == 0:
+            if backoff_timer > 10:
+                logging.debug("No more delete work? time to stop workers.")
+                break
+            backoff_timer +=1
+            logging.debug("Delete worker idle. Sleeping for {} sec".format(backoff_timer))
+            time.sleep(backoff_timer)
+        else:
+            backoff_timer = 0
+            if delete_queue.qsize() > 0:
+                logging.debug("Doing delete run")
+                try:
+                    sql_statement = delete_queue.get(block=True,timeout=1)
+                    execute_statement(sql_statement)
+                    delete_counter_queue.put(0)
+                except queue.Empty:
+                    logging.debug("Empty delete queue!")
 
 
 def deleter(delete_queue, delete_counter_queue, delete_process_queue):
@@ -634,7 +639,7 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
 
         logging.info("")
         logging.info("-"*60)
-        logging.info("Time spent: {}".format(human_time(elapsed_time_seconds)))
+        logging.info("Time spent: {}".format(human_time(elapsed_time_seconds_total)))
         logging.info("SELECT speed: {} queries/s. Overall: {} queries/s.".format(select_per_sec, select_per_sec_total))
         logging.info("DELETE speed: {} deletes/s. Overall: {} deletes/s.".format(delete_per_sec, delete_per_sec_total))
         logging.info("-"*60)
