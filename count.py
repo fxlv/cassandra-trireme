@@ -545,6 +545,8 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
 
     predicted_split_count = round(split_predicter(tr,split))
     start_time = datetime.datetime.now()
+    time_last = datetime.datetime.now()
+
 
 
     # start splitter
@@ -567,20 +569,33 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     deleter_thread = threading.Thread(target=deleter, args=(delete_queue, delete_counter_queue, delete_process_queue))
     deleter_thread.start()
 
-
+    last_select_count = 0
+    last_delete_count = 0
     # go into loop monitoring them all
     while True:
         current_time = datetime.datetime.now()
         # let's calculate some statistics
-        elapsed_time = current_time - start_time
+        elapsed_time_total = current_time - start_time
+        elapsed_time = current_time - time_last
+        elapsed_time_seconds_total = elapsed_time_total.total_seconds()
         elapsed_time_seconds = elapsed_time.total_seconds()
-        select_per_sec = round(getter_counter.qsize() / elapsed_time_seconds)
-        delete_per_sec = round(delete_counter_queue.qsize() / elapsed_time_seconds)
+
+        select_per_sec_total = round(getter_counter.qsize() / elapsed_time_seconds_total)
+        select_per_sec = round((getter_counter.qsize() - last_select_count) / elapsed_time_seconds)
+
+        delete_per_sec = round((delete_counter_queue.qsize() - last_delete_count) / elapsed_time_seconds)
+        delete_per_sec_total = round(delete_counter_queue.qsize() / elapsed_time_seconds_total)
+
+
+        last_select_count = getter_counter.qsize()
+        last_delete_count = delete_counter_queue.qsize()
+
+
         logging.info("")
         logging.info("-"*60)
         logging.info("Time spent: {}".format(human_time(elapsed_time_seconds)))
-        logging.info("SELECT speed: {} queries/s".format(select_per_sec))
-        logging.info("DELETE speed: {} deletes/s".format(delete_per_sec))
+        logging.info("SELECT speed: {} queries/s. Overall: {} queries/s.".format(select_per_sec, select_per_sec_total))
+        logging.info("DELETE speed: {} deletes/s. Overall: {} deletes/s.".format(delete_per_sec, delete_per_sec_total))
         logging.info("-"*60)
         logging.info("Split queue size: {}".format(split_queue.qsize()))
         logging.info("Result queue size: {}".format(getter_result_queue.qsize()))
@@ -593,7 +608,7 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
         logging.info("Active getter threads: {}".format(get_process_queue.qsize()))
         logging.info("Active deleter threads: {}".format(delete_process_queue.qsize()))
         logging.info("-"*60)
-
+        time_last = datetime.datetime.now()
         time.sleep(3)
 
 
