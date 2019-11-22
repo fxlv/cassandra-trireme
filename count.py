@@ -397,7 +397,7 @@ def splitter(tr, split, split_queue):
 
     while i <= tr.max - 1:
         if split_queue.qsize() > 1000:
-            logging.info("There are {} splits prepared. Pausing for a second.".format(split_queue.qsize()))
+            logging.debug("There are {} splits prepared. Pausing for a second.".format(split_queue.qsize()))
             time.sleep(1)
         else:
             i_max = i + pow(10, split)
@@ -450,7 +450,7 @@ def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_stat
                     time.sleep(10)
             else:
                 backoff_counter += 1
-                logging.info("No splits in the split queue. Will sleep {} sec".format(backoff_counter))
+                logging.debug("No splits in the split queue. Will sleep {} sec".format(backoff_counter))
                 time.sleep(backoff_counter)
                 process_reaper(get_process_queue)
 
@@ -472,7 +472,7 @@ def threaded_reductor(input_queue, output_queue):
     while True:
         if input_queue.qsize() == 0:
             backoff_timer+=1
-            logging.info("No results to reduce, reducer waiting for {} sec".format(backoff_timer))
+            logging.debug("No results to reduce, reducer waiting for {} sec".format(backoff_timer))
             time.sleep(backoff_timer)
         else:
             if backoff_timer >0:
@@ -497,7 +497,7 @@ def delete_preparer(delete_preparer_queue, delete_queue, keyspace, table, key, e
     while True:
         if delete_preparer_queue.qsize() == 0:
             backoff_timer+=1
-            logging.info("Delete preparer sleeping for {} sec".format(backoff_timer))
+            logging.debug("Delete preparer sleeping for {} sec".format(backoff_timer))
             time.sleep(backoff_timer)
         else:
             if backoff_timer > 0:
@@ -543,7 +543,8 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     # split_queue -> getter_result_queue -> delete_preparer_queue -> delete_queue -> delete_counter_queue
     #
 
-    predicted_split_count = split_predicter(tr,split)
+    predicted_split_count = round(split_predicter(tr,split))
+    start_time = datetime.datetime.now()
 
 
     # start splitter
@@ -569,7 +570,18 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
 
     # go into loop monitoring them all
     while True:
-        logging.info("-"*20)
+        current_time = datetime.datetime.now()
+        # let's calculate some statistics
+        elapsed_time = current_time - start_time
+        elapsed_time_seconds = elapsed_time.total_seconds()
+        select_per_sec = round(getter_counter.qsize() / elapsed_time_seconds)
+        delete_per_sec = round(delete_counter_queue.qsize() / elapsed_time_seconds)
+        logging.info("")
+        logging.info("-"*60)
+        logging.info("Time spent: {}".format(human_time(elapsed_time_seconds)))
+        logging.info("SELECT speed: {} queries/s".format(select_per_sec))
+        logging.info("DELETE speed: {} deletes/s".format(delete_per_sec))
+        logging.info("-"*60)
         logging.info("Split queue size: {}".format(split_queue.qsize()))
         logging.info("Result queue size: {}".format(getter_result_queue.qsize()))
         logging.info("Delete preparer queue size: {}".format(delete_preparer_queue.qsize()))
@@ -580,12 +592,9 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
         logging.info("Thread status:")
         logging.info("Active getter threads: {}".format(get_process_queue.qsize()))
         logging.info("Active deleter threads: {}".format(delete_process_queue.qsize()))
+        logging.info("-"*60)
 
-
-
-
-        logging.info("-"*20)
-        time.sleep(2)
+        time.sleep(3)
 
 
 
