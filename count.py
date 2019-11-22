@@ -33,6 +33,16 @@ class Result:
         return "Result(min: {}, max: {}, value: {})".format(
             self.min, self.max, self.value)
 
+class RowForDeletion:
+    def __init__(self, min, max, row):
+        self.min = min
+        self.max = max
+        self.row = row
+
+    def __str__(self):
+        return "Row for deletion: (min: {}, max: {}, row: {})".format(
+            self.min, self.max, self.row)
+
 class Settings:
     def __init__(self):
         pass
@@ -484,7 +494,9 @@ def threaded_reductor(input_queue, output_queue):
                 backoff_timer = 0
             result = input_queue.get()
             for row in result.value:
-                output_queue.put(row)
+                # for deletion, we want to be token range aware, so we pass token range information as well
+                rd = RowForDeletion(result.min, result.max,row)
+                output_queue.put(rd)
 
 def reductor(result_set):
     """Do the reduce part of map/reduce and return a list of rows."""
@@ -509,13 +521,21 @@ def delete_preparer(delete_preparer_queue, delete_queue, keyspace, table, key, e
                 backoff_timer = 0 #reset backoff timer
 
             # get item from queue
-            row_to_prepare = delete_preparer_queue.get()
+            row_to_prepare_with_tokens = delete_preparer_queue.get()
+            row_to_prepare = row_to_prepare_with_tokens.row
 
             prepared_dictionary = {}
             prepared_dictionary[key] = getattr(row_to_prepare, key)
             prepared_dictionary[extra_key] = getattr(row_to_prepare, extra_key)
 
-            sql = "{sql_statement} where ".format(sql_statement=sql_statement)
+            token_min = "token({key},{extra_key}) >= {token_min}".format(key=key, extra_key=extra_key,token_min=row_to_prepare_with_tokens.min)
+            token_max = "token({key},{extra_key}) < {token_max}".format(key=key, extra_key=extra_key,token_max=row_to_prepare_with_tokens.max)
+
+            sql = "{sql_statement} where {token_min} and {token_max} and ".format(sql_statement=sql_statement, token_min=token_min, token_max=token_max)
+
+            #
+            #   token(login_puid_hash, activity_time_date_trunc) >= 1689000000000000001 and token(login_puid_hash, activity_time_date_trunc) < 1690000000000000001
+            #
             andcount = 0
             for rkey in prepared_dictionary:
                 value = prepared_dictionary[rkey]
