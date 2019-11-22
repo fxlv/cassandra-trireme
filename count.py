@@ -314,13 +314,17 @@ def human_time(seconds):
 
     return human_time_string
 
-def sql_query_q(getter_counter,sql_statement, key_column, result_list, failcount, split_queue,
+def sql_query_q(delete_queue,getter_counter,sql_statement, key_column, result_list, failcount, split_queue,
               filter_string, kill_queue, extra_key):
     while True:
         if kill_queue.qsize() > 0:
             logging.warning("Aborting query on request.")
             return
         if split_queue.qsize() >0:
+            if delete_queue.qsize() > 1000: # TODO: 1000 should be enough for anyone, right? :)
+                # slow down with SELECTS if the DELETE queue is already big,
+                # as there is no point running if DELETE is not keeping up
+                time.sleep(1)
             (min, max) = split_queue.get()
             if extra_key:
                 sql_base_template = "{sql_statement} where token({key_column}, {extra_key}) " \
@@ -411,6 +415,7 @@ def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_stat
                           key_column,
                           split_queue,
                           filter_string,
+                            delete_queue,
                          extra_key=None):
     start_time = datetime.datetime.now()
     result_list = result_queue
@@ -429,7 +434,7 @@ def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_stat
                 if get_process_queue.qsize() < thread_count:
                     thread = threading.Thread(
                         target=sql_query_q,
-                        args=(getter_counter,sql_statement, key_column, result_list, failcount,
+                        args=(delete_queue,getter_counter,sql_statement, key_column, result_list, failcount,
                               split_queue, filter_string, kill_queue, extra_key))
                     thread.start()
                     logging.info("Started thread {}".format(thread))
@@ -554,7 +559,7 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     splitter_thread.start()
 
     # start getter
-    getter_thread = threading.Thread(target=get_rows, kwargs=dict(get_process_queue=get_process_queue,getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
+    getter_thread = threading.Thread(target=get_rows, kwargs=dict(delete_queue=delete_queue,get_process_queue=get_process_queue,getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
     getter_thread.start()
 
     # reducer
@@ -680,7 +685,7 @@ def update_rows(session,
     logging.info("Operation complete.")
 
 
-def get_rows(get_process_queue,getter_counter,result_queue,session, keyspace, table,
+def get_rows(delete_queue,get_process_queue,getter_counter,result_queue,session, keyspace, table,
              key, split_queue,
              value_column=None, filter_string=None, extra_key=None):
 
@@ -705,6 +710,7 @@ def get_rows(get_process_queue,getter_counter,result_queue,session, keyspace, ta
     result = distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_statement,
                                    key_column=key,
                                    split_queue=split_queue,
+                                   delete_queue=delete_queue,
                                    filter_string=filter_string, extra_key=extra_key)
 
 
