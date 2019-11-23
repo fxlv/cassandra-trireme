@@ -12,6 +12,7 @@ import logging
 import queue
 import sys
 import threading
+import multiprocessing
 import time
 import platform
 from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
@@ -345,43 +346,85 @@ def human_time(seconds):
 
     return human_time_string
 
-def sql_query_q(delete_queue,getter_counter,sql_statement, key_column, result_list, failcount, split_queue,
+def batch_executer(cas_settings,batch_q, batch_result_q):
+    logging.info("STARTING batch executor with batch q size: {}".format(batch_q.qsize()))
+    s = get_cassandra_session(cas_settings[0],cas_settings[1],cas_settings[2],cas_settings[3],cas_settings[4],cas_settings[5],cas_settings[6])
+    time.sleep(10)
+    while batch_q.qsize() >0:
+        try:
+            (min, max, sql) = batch_q.get()
+            logging.info("Executing via BATCH: {}".format(sql))
+            result = s.execute(sql)
+            r = Result(min, max, result)
+            batch_result_q.put(r)
+            logging.info("Result: {}".format(r))
+        except Exception as e:
+            logging.warning(
+                "Got Cassandra exception: "
+                "{msg} when running query: {sql}"
+                    .format(sql=sql, msg=e))
+
+def sql_query_q(cas_settings,delete_queue,getter_counter,sql_statement, key_column, result_list, failcount, split_queue,
               filter_string, kill_queue, extra_key):
     while True:
         if kill_queue.qsize() > 0:
             logging.warning("Aborting query on request.")
             return
         if split_queue.qsize() >0:
-            if delete_queue.qsize() > 1000: # TODO: 1000 should be enough for anyone, right? :)
+            if delete_queue.qsize() > 2000: # TODO: 2000 should be enough for anyone, right? :)
                 # slow down with SELECTS if the DELETE queue is already big,
                 # as there is no point running if DELETE is not keeping up
                 time.sleep(1)
-            (min, max) = split_queue.get()
+
             if extra_key:
                 sql_base_template = "{sql_statement} where token({key_column}, {extra_key}) " \
                                     ">= {min} and token({key_column}, {extra_key}) < {max}"
             else:
                 sql_base_template = "{sql_statement} where token({key_column}) " \
-                                ">= {min} and token({key_column}) < {max}"
+                                    ">= {min} and token({key_column}) < {max}"
             if filter_string:
                 sql_base_template += " and {}".format(filter_string)
-            sql = sql_base_template.format(sql_statement=sql_statement,
-                                           min=min,
-                                           max=max,
-                                           key_column=key_column, extra_key=extra_key)
-            try:
-                if result_list.qsize() % 100 == 0:
-                    logging.debug("Executing: {}".format(sql))
-                result = session.execute(sql)
-                getter_counter.put(0)
-                r = Result(min, max, result)
-                result_list.put(r)
-            except Exception as e:
-                failcount += 1
-                logging.warning(
-                                "Got Cassandra exception: "
-                                "{msg} when running query: {sql}"
-                                .format(sql=sql, msg=e))
+
+
+            # prepare query for execution and then based on queue size, either execute within this thread or delegate in a batch to a separate process
+
+            if split_queue.qsize() > 1000:
+                # do the batch approach and get a list of splits from the queue
+                batch_q = multiprocessing.Queue()
+                batch_result_q = multiprocessing.Queue()
+                for i in range(100):
+                    (min, max) = split_queue.get()
+                    sql = sql_base_template.format(sql_statement=sql_statement,
+                                                   min=min,
+                                                   max=max,
+                                                   key_column=key_column, extra_key=extra_key)
+                    batch_q.put((min, max, sql))
+                    p = multiprocessing.Process(target=batch_executer, args=(cas_settings,batch_q, batch_result_q))
+                    p.start()
+
+                    logging.info("Batch finished: {} / {} ".format(batch_q.qsize(), batch_result_q.qsize()))
+
+            else:
+                # handle query here in the thread
+                (min, max) = split_queue.get()
+
+                sql = sql_base_template.format(sql_statement=sql_statement,
+                                               min=min,
+                                               max=max,
+                                               key_column=key_column, extra_key=extra_key)
+                try:
+                    if result_list.qsize() % 100 == 0:
+                        logging.debug("Executing: {}".format(sql))
+                    result = session.execute(sql)
+                    getter_counter.put(0)
+                    r = Result(min, max, result)
+                    result_list.put(r)
+                except Exception as e:
+                    failcount += 1
+                    logging.warning(
+                                    "Got Cassandra exception: "
+                                    "{msg} when running query: {sql}"
+                                    .format(sql=sql, msg=e))
         else:
             logging.debug("Stopping getter thread due to zero split queue size.")
             break
@@ -431,7 +474,7 @@ def splitter(tr, split, split_queue):
     logging.info("Predicted split count is {} splits".format(predicted_split_count))
 
     while i <= tr.max - 1:
-        if split_queue.qsize() > 1000:
+        if split_queue.qsize() > 2000:
             logging.debug("There are {} splits prepared. Pausing for a second.".format(split_queue.qsize()))
             time.sleep(1)
         else:
@@ -442,7 +485,7 @@ def splitter(tr, split, split_queue):
             i = i_max
     logging.info("Splitter is done. All splits created")
 
-def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_statement,
+def distributed_sql_query(cas_settings,get_process_queue,getter_counter,result_queue,sql_statement,
                           key_column,
                           split_queue,
                           filter_string,
@@ -451,7 +494,7 @@ def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_stat
     start_time = datetime.datetime.now()
     result_list = result_queue
     failcount = 0
-    thread_count = 15
+    thread_count = 1
     kill_queue = queue.Queue()  # TODO: change this to an event?
 
     backoff_counter = 0
@@ -465,7 +508,7 @@ def distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_stat
                 if get_process_queue.qsize() < thread_count:
                     thread = threading.Thread(
                         target=sql_query_q,
-                        args=(delete_queue,getter_counter,sql_statement, key_column, result_list, failcount,
+                        args=(cas_settings,delete_queue,getter_counter,sql_statement, key_column, result_list, failcount,
                               split_queue, filter_string, kill_queue, extra_key))
                     thread.start()
                     logging.info("Started thread {}".format(thread))
@@ -573,7 +616,7 @@ def delete_preparer(delete_preparer_queue, delete_queue, keyspace, table, key, e
 
 
 
-def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_key=None):
+def delete_rows(cas_settings,session, keyspace, table, key, split, filter_string, tr, extra_key=None):
 
     split_queue = queue.Queue()
     getter_result_queue = queue.Queue()
@@ -600,7 +643,7 @@ def delete_rows(session, keyspace, table, key, split, filter_string, tr, extra_k
     splitter_thread.start()
 
     # start getter
-    getter_thread = threading.Thread(target=get_rows, kwargs=dict(delete_queue=delete_queue,get_process_queue=get_process_queue,getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
+    getter_thread = threading.Thread(target=get_rows, kwargs=dict(cas_settings=cas_settings,delete_queue=delete_queue,get_process_queue=get_process_queue,getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
     getter_thread.start()
 
     # reducer
@@ -726,7 +769,7 @@ def update_rows(session,
     logging.info("Operation complete.")
 
 
-def get_rows(delete_queue,get_process_queue,getter_counter,result_queue,session, keyspace, table,
+def get_rows(cas_settings,delete_queue,get_process_queue,getter_counter,result_queue,session, keyspace, table,
              key, split_queue,
              value_column=None, filter_string=None, extra_key=None):
 
@@ -748,7 +791,7 @@ def get_rows(delete_queue,get_process_queue,getter_counter,result_queue,session,
                                         keyspace=keyspace,
                                         table=table)
     logging.info("Running distributed query: '{sql}'".format(sql=sql_statement))
-    result = distributed_sql_query(get_process_queue,getter_counter,result_queue,sql_statement,
+    result = distributed_sql_query(cas_settings,get_process_queue,getter_counter,result_queue,sql_statement,
                                    key_column=key,
                                    split_queue=split_queue,
                                    delete_queue=delete_queue,
@@ -949,6 +992,9 @@ if __name__ == "__main__":
     session = get_cassandra_session(args.host, args.port, args.user,
                                     args.password, args.ssl_cert, args.ssl_key,
                                     args.ssl_v1)
+    cas_settings = (args.host, args.port, args.user,
+                                    args.password, args.ssl_cert, args.ssl_key,
+                                    args.ssl_v1)
 
     if args.min_token and args.max_token:
         tr = Token_range(args.min_token, args.max_token)
@@ -971,7 +1017,7 @@ if __name__ == "__main__":
                     args.update_key, args.update_value, args.split,
                     args.filter_string, args.extra_key)
     elif args.action == "delete-rows":
-        delete_rows(session, args.keyspace, args.table, args.key, args.split,
+        delete_rows(cas_settings,session, args.keyspace, args.table, args.key, args.split,
                     args.filter_string, tr, args.extra_key)
 
     else:
