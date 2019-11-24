@@ -68,6 +68,10 @@ def parse_user_args():
                         type=int,
                         default=18,
                         help="Split (see documentation)")
+    parser.add_argument("--workers",
+                        type=int,
+                        default=1,
+                        help="Amount of worker processes to use")
     parser.add_argument("--port",
                         type=int,
                         default=9042,
@@ -506,8 +510,6 @@ def delete_rows(queues, rsettings):
     for row in get_rows(queues, rsettings):
         sql_template = "delete from {keyspace}.{table} where token({key},{extra_key}) >= {min} and token({key},{extra_key}) < {max} and {key} = '{value}' and {extra_key} = '{extra_value}'"
         sql_statement = sql_template.format(keyspace=rsettings.keyspace, table=rsettings.table, key=rsettings.key, extra_key=rsettings.extra_key, min=row.min, max=row.max, value=row.value.get(rsettings.key), extra_value=utc_time(row.value.get(rsettings.extra_key)))
-        print(row)
-        print(sql_statement)
         t = CassandraWorkerTask(sql_statement, (row.min, row.max))
         t.task_type = "delete" # used for statistics purpose only
         queues.worker_queue.put(t)
@@ -886,14 +888,12 @@ def process_manager(queues, rsettings):
     reducer_process = multiprocessing.Process(target=reducer, args=(queues,rsettings))
     reducer_process.start()
 
-    # workers
-    worker_process = multiprocessing.Process(target=cassandra_worker, args=(queues,rsettings))
-    worker_process.start()
-
-    # workers
-    worker_process2 = multiprocessing.Process(target=cassandra_worker, args=(queues,rsettings))
-    worker_process2.start()
-
+    workers = []
+    for w in range(rsettings.workers):
+        # workers
+        worker_process = multiprocessing.Process(target=cassandra_worker, args=(queues,rsettings))
+        worker_process.start()
+        workers.append(worker_process)
 
 def reducer(queues, rsettings):
     """Filter out the relevant information from Cassandra results"""
@@ -1033,6 +1033,7 @@ if __name__ == "__main__":
     rsettings.filter_string = args.filter_string
     rsettings.tr = tr
     rsettings.cas_settings = cas_settings
+    rsettings.workers = args.workers
 
     process_manager(queues,rsettings)
 
