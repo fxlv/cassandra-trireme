@@ -15,43 +15,18 @@ import threading
 import multiprocessing
 import time
 import platform
+import os
 from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
 
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 
-default_min_token = -9223372036854775808
-default_max_token = 9223372036854775807
+from datastructures import Result, RowForDeletion, Token_range, Mapper_task, Queues, RuntimeSettings, CassandraSettings, \
+    CassandraWorkerTask
+from presentation import human_time
 
-
-class Result:
-    def __init__(self, min, max, value):
-        self.min = min
-        self.max = max
-        self.value = value
-
-    def __str__(self):
-        return "Result(min: {}, max: {}, value: {})".format(
-            self.min, self.max, self.value)
-
-class RowForDeletion:
-    def __init__(self, min, max, row):
-        self.min = min
-        self.max = max
-        self.row = row
-
-    def __str__(self):
-        return "Row for deletion: (min: {}, max: {}, row: {})".format(
-            self.min, self.max, self.row)
-
-class Settings:
-    def __init__(self):
-        pass
-
-class Token_range:
-    def __init__(self, min, max):
-        self.min = min
-        self.max = max
+# settings
+from settings import default_min_token, default_max_token
 
 
 def parse_user_args():
@@ -268,84 +243,6 @@ def process_reaper(process_queue):
         else:
             logging.debug("Reaping process {}".format(process))
 
-def delete_worker(delete_queue, delete_counter_queue):
-
-    backoff_timer = 0
-    while True:
-        if delete_queue.qsize() == 0:
-            if backoff_timer > 10:
-                logging.debug("No more delete work? time to stop workers.")
-                break
-            backoff_timer +=1
-            logging.debug("Delete worker idle. Sleeping for {} sec".format(backoff_timer))
-            time.sleep(backoff_timer)
-        else:
-            backoff_timer = 0
-            if delete_queue.qsize() > 0:
-                logging.debug("Doing delete run")
-                try:
-                    sql_statement = delete_queue.get(block=True,timeout=1)
-                    execute_statement(sql_statement)
-                    delete_counter_queue.put(0)
-                except queue.Empty:
-                    logging.debug("Empty delete queue!")
-
-
-def deleter(delete_queue, delete_counter_queue, delete_process_queue):
-
-    thread_count = 10
-
-
-    while True:
-        if delete_queue.qsize() == 0:
-            logging.debug("Deleter spinning.")
-            process_reaper(delete_process_queue)
-            time.sleep(2)
-        else:
-            if delete_process_queue.qsize() < thread_count:
-                thread = threading.Thread(target=delete_worker,args=(delete_queue, delete_counter_queue))
-                thread.start()
-                logging.debug("Started delete sub-thread {}".format(thread))
-                delete_process_queue.put(thread)
-            else:
-                if delete_queue.qsize() % 10 == 0:
-                    logging.debug("Max process count {} reached for the deleter".format(thread_count))
-                    logging.debug("{} more queries remaining".format(delete_queue.qsize() ))
-                time.sleep(1)
-                process_reaper(delete_process_queue)
-
-def seconds_to_human(seconds):
-    # default values
-    hours = 0
-    minutes = 0
-
-    # find minutes and the reminder of seconds
-    if seconds >= 60:
-        remaining_seconds = seconds % 60
-        minutes = round((seconds - remaining_seconds) / 60)
-        seconds = remaining_seconds
-    if minutes >= 60:
-        remaining_minutes = minutes % 60
-        hours = round((minutes - remaining_minutes) / 60)
-        minutes = remaining_minutes
-    return hours, minutes, seconds
-
-
-def human_time(seconds):
-    hours, minutes, seconds = seconds_to_human(seconds)
-
-    if hours:
-        human_time_string = "{} hours, {} minutes, {} seconds".format(
-            hours, minutes, seconds)
-    elif minutes:
-        human_time_string = "{} hours, {} minutes, {} seconds".format(
-            hours, minutes, seconds)
-    else:
-        human_time_string = "{} hours, {} minutes, {} seconds".format(
-            hours, minutes, seconds)
-
-    return human_time_string
-
 def batch_executer(cas_settings,batch_q, batch_result_q):
     logging.info("STARTING batch executor with batch q size: {}".format(batch_q.qsize()))
     s = get_cassandra_session(cas_settings[0],cas_settings[1],cas_settings[2],cas_settings[3],cas_settings[4],cas_settings[5],cas_settings[6])
@@ -466,31 +363,29 @@ def split_predicter(tr, split):
     predicted_split_count = (tr.max - tr.min) / pow(10, split)
     return predicted_split_count
 
-def splitter(tr, split, split_queue):
-    # calculate token ranges for distributing the query
+def splitter(queues, rsettings):
+    tr = rsettings.tr
     i = tr.min
-    predicted_split_count = split_predicter(tr,split)
-    logging.info("Preparing splits with split size {}".format(split))
+    predicted_split_count = split_predicter(tr,rsettings.split)
+    logging.info("Preparing splits with split size {}".format(rsettings.split))
     logging.info("Predicted split count is {} splits".format(predicted_split_count))
-
+    splitcounter = 0
     while i <= tr.max - 1:
-        if split_queue.qsize() > 2000:
-            logging.debug("There are {} splits prepared. Pausing for a second.".format(split_queue.qsize()))
+        if queues.split_queue.full():
+            logging.debug("There are {} splits prepared. Pausing for a second.".format(splitcounter))
             time.sleep(1)
         else:
-            i_max = i + pow(10, split)
+            i_max = i + pow(10, rsettings.split)
             if i_max > tr.max:
                 i_max = tr.max  # don't go higher than max_token
-            split_queue.put((i, i_max))
+            queues.split_queue.put((i, i_max))
+            queues.stats_queue_splits.put(0)
+            splitcounter+=1
             i = i_max
     logging.info("Splitter is done. All splits created")
 
-def distributed_sql_query(cas_settings,get_process_queue,getter_counter,result_queue,sql_statement,
-                          key_column,
-                          split_queue,
-                          filter_string,
-                            delete_queue,
-                         extra_key=None):
+
+def distributed_sql_query(sql_statement, cas_settings, queues, rsettings):
     start_time = datetime.datetime.now()
     result_list = result_queue
     failcount = 0
@@ -559,17 +454,9 @@ def threaded_reductor(input_queue, output_queue):
             result = input_queue.get()
             for row in result.value:
                 # for deletion, we want to be token range aware, so we pass token range information as well
-                rd = RowForDeletion(result.min, result.max,row)
+                rd = RowForDeletion(result.min, result.max, row)
                 output_queue.put(rd)
 
-def reductor(result_set):
-    """Do the reduce part of map/reduce and return a list of rows."""
-    result_list = []
-    while result_set.qsize() > 0:
-        result = result_set.get()
-        for row in result.value:
-            result_list.append(row)
-    return result_list
 
 def delete_preparer(delete_preparer_queue, delete_queue, keyspace, table, key, extra_key):
     sql_template = "delete from {keyspace}.{table}"
@@ -598,7 +485,6 @@ def delete_preparer(delete_preparer_queue, delete_queue, keyspace, table, key, e
             sql = "{sql_statement} where {token_min} and {token_max} and ".format(sql_statement=sql_statement, token_min=token_min, token_max=token_max)
 
             #
-            #   token(login_puid_hash, activity_time_date_trunc) >= 1689000000000000001 and token(login_puid_hash, activity_time_date_trunc) < 1690000000000000001
             #
             andcount = 0
             for rkey in prepared_dictionary:
@@ -616,94 +502,16 @@ def delete_preparer(delete_preparer_queue, delete_queue, keyspace, table, key, e
 
 
 
-def delete_rows(cas_settings,session, keyspace, table, key, split, filter_string, tr, extra_key=None):
-
-    split_queue = queue.Queue()
-    getter_result_queue = queue.Queue()
-    getter_counter = queue.Queue()
-    delete_preparer_queue = queue.Queue()
-    delete_queue = queue.Queue()
-    delete_counter_queue = queue.Queue()
-    delete_process_queue = queue.Queue()
-    get_process_queue = queue.Queue()
-
-    #
-    # Flow:
-    # split_queue -> getter_result_queue -> delete_preparer_queue -> delete_queue -> delete_counter_queue
-    #
-
-    predicted_split_count = round(split_predicter(tr,split))
-    start_time = datetime.datetime.now()
-    time_last = datetime.datetime.now()
-
-
-
-    # start splitter
-    splitter_thread = threading.Thread(target=splitter, args=(tr, split, split_queue))
-    splitter_thread.start()
-
-    # start getter
-    getter_thread = threading.Thread(target=get_rows, kwargs=dict(cas_settings=cas_settings,delete_queue=delete_queue,get_process_queue=get_process_queue,getter_counter=getter_counter,result_queue=getter_result_queue,session=session, keyspace=keyspace, table=table, key=key, split_queue=split_queue, filter_string=filter_string, extra_key=extra_key))
-    getter_thread.start()
-
-    # reducer
-    reducer_thread = threading.Thread(target=threaded_reductor, args=(getter_result_queue, delete_preparer_queue))
-    reducer_thread.start()
-
-    # delete preparer
-    delete_preparer_thread = threading.Thread(target=delete_preparer, args=(delete_preparer_queue, delete_queue, keyspace, table, key, extra_key))
-    delete_preparer_thread.start()
-
-    # and the actual deleter
-    deleter_thread = threading.Thread(target=deleter, args=(delete_queue, delete_counter_queue, delete_process_queue))
-    deleter_thread.start()
-
-    last_select_count = 0
-    last_delete_count = 0
-    # go into loop monitoring them all
-    while True:
-        current_time = datetime.datetime.now()
-        # let's calculate some statistics
-        elapsed_time_total = current_time - start_time
-        elapsed_time = current_time - time_last
-        elapsed_time_seconds_total = elapsed_time_total.total_seconds()
-        elapsed_time_seconds = elapsed_time.total_seconds()
-
-        select_per_sec_total = round(getter_counter.qsize() / elapsed_time_seconds_total)
-        select_per_sec = round((getter_counter.qsize() - last_select_count) / elapsed_time_seconds)
-
-        delete_per_sec = round((delete_counter_queue.qsize() - last_delete_count) / elapsed_time_seconds)
-        delete_per_sec_total = round(delete_counter_queue.qsize() / elapsed_time_seconds_total)
-
-
-        last_select_count = getter_counter.qsize()
-        last_delete_count = delete_counter_queue.qsize()
-
-
-        logging.info("")
-        logging.info("-"*60)
-        logging.info("Time spent: {}".format(human_time(elapsed_time_seconds_total)))
-        logging.info("SELECT speed: {} queries/s. Overall: {} queries/s.".format(select_per_sec, select_per_sec_total))
-        logging.info("DELETE speed: {} deletes/s. Overall: {} deletes/s.".format(delete_per_sec, delete_per_sec_total))
-        logging.info("-"*60)
-        logging.info("Split queue size: {}".format(split_queue.qsize()))
-        logging.info("Result queue size: {}".format(getter_result_queue.qsize()))
-        logging.info("Delete preparer queue size: {}".format(delete_preparer_queue.qsize()))
-        logging.info("Delete queue size: {}".format(delete_queue.qsize()))
-        logging.info("Results:")
-        logging.info("Split progress: {}/{}".format(getter_counter.qsize(), predicted_split_count))
-        logging.info("Delete counter: {}".format(delete_counter_queue.qsize()))
-        logging.info("Thread status:")
-        logging.info("Active getter threads: {}".format(get_process_queue.qsize()))
-        logging.info("Active deleter threads: {}".format(delete_process_queue.qsize()))
-        logging.info("-"*60)
-        time_last = datetime.datetime.now()
-        time.sleep(3)
-
-
-
-
-
+def delete_rows(queues, rsettings):
+    for row in get_rows(queues, rsettings):
+        sql_template = "delete from {keyspace}.{table} where token({key},{extra_key}) >= {min} and token({key},{extra_key}) < {max} and {key} = '{value}' and {extra_key} = '{extra_value}'"
+        sql_statement = sql_template.format(keyspace=rsettings.keyspace, table=rsettings.table, key=rsettings.key, extra_key=rsettings.extra_key, min=row.min, max=row.max, value=row.value.get(rsettings.key), extra_value=utc_time(row.value.get(rsettings.extra_key)))
+        print(row)
+        print(sql_statement)
+        t = CassandraWorkerTask(sql_statement, (row.min, row.max))
+        t.task_type = "delete" # used for statistics purpose only
+        queues.worker_queue.put(t)
+        queues.stats_queue_delete_scheduled.put(0)
 
 
 def update_rows(session,
@@ -769,79 +577,72 @@ def update_rows(session,
     logging.info("Operation complete.")
 
 
-def get_rows(cas_settings,delete_queue,get_process_queue,getter_counter,result_queue,session, keyspace, table,
-             key, split_queue,
-             value_column=None, filter_string=None, extra_key=None):
+def get_rows(queues, rsettings):
+    """Generator that returns rows as we get them from worker"""
 
-    session.execute("use {}".format(keyspace))
-
-    if not value_column:
-        select_values = "*"
-    else:
-        if extra_key:
-            select_values = "{key}, {extra_key}, {value_column}".format(
-                key=key, extra_key=extra_key, value_column=value_column)
+    sql_template = "select * from {keyspace}.{table}"
+    sql_statement = sql_template.format(keyspace=rsettings.keyspace, table=rsettings.table)
+    mt = Mapper_task(sql_statement, rsettings.key, rsettings.filter_string)
+    mt.parser = get_result_parser
+    queues.mapper_queue.put(mt)
+    while True:
+        if queues.results_queue.empty():
+            logging.debug("Waiting on results...")
+            time.sleep(5)
         else:
-            select_values = "{key}, {value_column}".format(
-                key=key, value_column=value_column)
-
-    sql_template = "select {select_values} from {keyspace}.{table}"
-
-    sql_statement = sql_template.format(select_values=select_values,
-                                        keyspace=keyspace,
-                                        table=table)
-    logging.info("Running distributed query: '{sql}'".format(sql=sql_statement))
-    result = distributed_sql_query(cas_settings,get_process_queue,getter_counter,result_queue,sql_statement,
-                                   key_column=key,
-                                   split_queue=split_queue,
-                                   delete_queue=delete_queue,
-                                   filter_string=filter_string, extra_key=extra_key)
+            yield queues.results_queue.get()
+            queues.stats_queue_results_consumed.put(0)
 
 
-def get_rows_count(session,
-                   keyspace,
-                   table,
-                   key,
-                   split,
-                   filter_string=None,
-                   aggregate=True,
-                   token_range=None):
-    session.execute("use {}".format(keyspace))
+
+
+
+def get_rows_count(queues, rsettings):
+
 
     sql_template = "select count(*) from {keyspace}.{table}"
 
-    sql_statement = sql_template.format(keyspace=keyspace, table=table)
-    result = distributed_sql_query(sql_statement,
-                                   key_column=key,
-                                   split=split,
-                                   filter_string=filter_string,
-                                   token_range=token_range)
+    sql_statement = sql_template.format(keyspace=rsettings.keyspace, table=rsettings.table)
     count = 0
+    aggregate = True
+    mt = Mapper_task(sql_statement, rsettings.key, rsettings.filter_string)
+    mt.parser = count_result_parser;
+    queues.mapper_queue.put(mt)
+    total = 0
+    while True:
+        if queues.results_queue.empty():
+            logging.debug("Waiting on results...")
+            logging.debug("Total so far: {}".format(total))
 
-    unaggregated_count = []
-    while result.qsize() > 0:
-        r = result.get()
-        if aggregate:
-            count += r.value[0].count
+            time.sleep(5)
         else:
-            split_count = Result(r.min, r.max, r.value[0])
-            unaggregated_count.append(split_count)
-    if aggregate:
-        return count
-    else:
-        return unaggregated_count
+            res = queues.results_queue.get()
+            queues.stats_queue_results_consumed.put(0)
+            total += res.value
+    print("Total row count is {}".format(total))
+
+    # now, chill and wait for results
+    #
+    #
+    #  this was needed for wide partition finder, the count per partition
+    #
+    #
+    # unaggregated_count = []
+    # while result.qsize() > 0:
+    #     r = result.get()
+    #     if aggregate:
+    #         count += r.value[0].count
+    #     else:
+    #         split_count = Result(r.min, r.max, r.value[0])
+    #         unaggregated_count.append(split_count)
+    # if aggregate:
+    #     return count
+    # else:
+    #     return unaggregated_count
 
 
-def print_rows(session,
-               keyspace,
-               table,
-               key,
-               split,
-               value_column=None,
-               filter_string=None, extra_key=None):
-    rows = get_rows(session, keyspace, table, key, split, value_column,
-                    filter_string, extra_key)
-    for row in rows:
+def print_rows(queues, rsettings):
+    for row in get_rows(queues, rsettings):
         print(row)
 
 
@@ -968,10 +769,227 @@ def find_wide_partitions(session,
     # .......
 
 
-def print_rows_count(session, keyspace, table, key, split, filter_string=None):
-    count = get_rows_count(session, keyspace, table, key, split, filter_string)
+def print_rows_count(queues, rsettings):
+    count = get_rows_count(queues, rsettings)
     print("Total amount of rows in {keyspace}.{table} is {count}".format(
-        keyspace=keyspace, table=table, count=count))
+        keyspace=rsettings.keyspace, table=rsettings.table, count=count))
+
+def stats_monitor(queues, rsettings):
+    start_time = datetime.datetime.now()
+    stats_split_count = 0
+    stats_split_count_delta = 0
+    stats_map_count = 0
+    stats_deleted_count = 0
+    stats_delete_scheduled_count = 0
+    stats_map_count_delta = 0
+    stats_worker_count = 0
+    stats_result_count = 0
+    stats_result_count_delta = 0
+    stats_result_consumed_count = 0
+    stats_result_consumed_count_delta = 0
+
+
+
+    predicted_split_count = round(split_predicter(rsettings.tr,rsettings.split))
+
+    while True:
+        iteration_start = datetime.datetime.now()
+        # TODO: refactor this to use a map of queue and stats counter and do it in a loop instead of 3 conditionals
+        if not queues.stats_queue_splits.empty():
+            try:
+                stats_split_count_prev = stats_split_count
+                while not queues.stats_queue_splits.empty():
+                    queues.stats_queue_splits.get()
+                    stats_split_count += 1
+                stats_split_count_delta = stats_split_count - stats_split_count_prev
+
+            except:
+                logging.warning("Stats queue for splits empty, but noone else should have been consuming it.")
+
+        if not queues.stats_queue_mapper.empty():
+            try:
+                stats_map_count_prev = stats_map_count
+                while not queues.stats_queue_mapper.empty():
+                    queues.stats_queue_mapper.get()
+                    stats_map_count += 1
+                stats_map_count_delta = stats_map_count - stats_map_count_prev
+            except:
+                logging.warning("Stats queue for mapper empty, but noone else should have been consuming it.")
+
+        if not queues.stats_queue_results.empty():
+            try:
+                stats_result_count_prev = stats_result_count
+                while not queues.stats_queue_results.empty():
+                    queues.stats_queue_results.get()
+                    stats_result_count += 1
+                stats_result_count_delta = stats_result_count - stats_result_count_prev
+            except:
+                logging.warning("Stats queue for results empty, but noone else should have been consuming it.")
+        if not queues.stats_queue_results_consumed.empty():
+            try:
+                while not queues.stats_queue_results_consumed.empty():
+                    queues.stats_queue_results_consumed.get()
+                    stats_result_consumed_count += 1
+            except:
+                logging.warning("Stats queue for results_consumed empty, but noone else should have been consuming it.")
+
+        if not queues.stats_queue_deleted.empty():
+            try:
+                while not queues.stats_queue_deleted.empty():
+                    queues.stats_queue_deleted.get()
+                    stats_deleted_count += 1
+            except:
+                logging.warning("Stats queue for deleted empty, but noone else should have been consuming it.")
+
+        if not queues.stats_queue_delete_scheduled.empty():
+            try:
+                while not queues.stats_queue_delete_scheduled.empty():
+                    queues.stats_queue_delete_scheduled.get()
+                    stats_delete_scheduled_count += 1
+            except:
+                logging.warning("Stats queue for delete scheduled empty, but noone else should have been consuming it.")
+        print()
+        print("Performance::  splits: {}/{} ({}), maps: {} ({}), results consumption: {}/{} ({})".format(stats_split_count, predicted_split_count, stats_split_count_delta, stats_map_count, stats_map_count_delta,  stats_result_consumed_count, stats_result_count, stats_result_count_delta))
+        if stats_delete_scheduled_count >0:
+            print("Deleted {}/{} rows".format(stats_deleted_count,stats_delete_scheduled_count))
+        time.sleep(1)
+
+def queue_monitor(queues, rsettings):
+    while True:
+
+        logging.debug("Queue status:")
+        logging.debug("Split queue full: {} empty: {}".format(queues.split_queue.full(), queues.split_queue.empty()))
+        logging.debug("Map queue full: {} empty: {}".format(queues.mapper_queue.full(), queues.mapper_queue.empty()))
+        logging.debug("Worker queue full: {} empty: {}".format(queues.worker_queue.full(), queues.worker_queue.empty()))
+        logging.debug("Results queue full: {} empty: {}".format(queues.results_queue.full(), queues.results_queue.empty()))
+        time.sleep(5)
+
+def process_manager(queues, rsettings):
+
+    # queue monitor
+    qmon_process = multiprocessing.Process(target=queue_monitor, args=(queues, rsettings))
+    qmon_process.start()
+
+    # stats monitor
+    smon_process = multiprocessing.Process(target=stats_monitor, args=(queues, rsettings))
+    smon_process.start()
+
+    # start splitter
+    splitter_process = multiprocessing.Process(target=splitter, args=(queues, rsettings))
+    splitter_process.start()
+
+    # mapper
+    mapper_process = multiprocessing.Process(target=mapper, args=(queues,rsettings))
+    mapper_process.start()
+    
+    # reducer
+    reducer_process = multiprocessing.Process(target=reducer, args=(queues,rsettings))
+    reducer_process.start()
+
+    # workers
+    worker_process = multiprocessing.Process(target=cassandra_worker, args=(queues,rsettings))
+    worker_process.start()
+
+    # workers
+    worker_process2 = multiprocessing.Process(target=cassandra_worker, args=(queues,rsettings))
+    worker_process2.start()
+
+
+def reducer(queues, rsettings):
+    """Filter out the relevant information from Cassandra results"""
+
+    pid = os.getpid()
+    print("Reducer started")
+    while True:
+        # wait for work
+        if queues.reducer_queue.empty():
+            logging.debug("Reducer {} waiting for work".format(pid))
+            time.sleep(2)
+        else:
+            result = queues.reducer_queue.get()
+            logging.debug("Got task {} from reducer queue".format(result))
+            for row in result.value:
+                queues.results_queue.put(row)
+
+def utc_time(value):
+    if isinstance(value, datetime.datetime):
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return value
+
+def count_result_parser(row, rsettings=None):
+    return row.count
+
+def get_result_parser(row, rsettings=None):
+    results_that_we_care_about = {}
+    results_that_we_care_about[rsettings.key] = getattr(row, rsettings.key)
+    results_that_we_care_about[rsettings.extra_key] = getattr(row, rsettings.extra_key)
+
+    return results_that_we_care_about
+
+def cassandra_worker(queues, rsettings):
+    """Executes SQL statements and puts results in result queue"""
+    cas_settings = rsettings.cas_settings
+    pid = os.getpid()
+    session = get_cassandra_session(cas_settings.host, cas_settings.port, cas_settings.user,
+                                    cas_settings.password, cas_settings.ssl_cert, cas_settings.ssl_key,
+                                    cas_settings.ssl_v1)
+
+    sql = "use {}".format(rsettings.keyspace)
+    logging.debug("Executing SQL: {}".format(sql))
+    session.execute(sql)
+    if not session.is_shutdown:
+        logging.debug("Worker {} connected to Cassandra.".format(pid))
+        while True:
+            # wait for work
+            if queues.worker_queue.empty():
+                logging.debug("Worker {} waiting for work".format(pid))
+                time.sleep(2)
+            else:
+                task = queues.worker_queue.get()
+                logging.debug("Got task {} from worker queue".format(task))
+                r = session.execute(task.sql)
+                if task.task_type == "delete":
+                    queues.stats_queue_deleted.put(0)
+                    logging.debug("DELETE: {}".format(task.sql))
+                else:
+                    for row in r:
+                        logging.debug(row)
+                        if task.parser:
+                            row = task.parser(row, rsettings)
+                        res = Result(task.split_min, task.split_max, row)
+                        logging.debug(res)
+                        queues.results_queue.put(res)
+                        queues.stats_queue_results.put(0)
+
+
+def mapper(queues, rsettings):
+    """Prepares SQL statements for worker and puts tasks in worker queue"""
+    try:
+        map_task = queues.mapper_queue.get(True,5) # initially, wait for 5 sec to receive first work orders
+    except:
+        logging.warning("Mapper did not receive any work...timed out.")
+        return False
+
+    print("mapper Received work assignment::: {}".format(map_task.sql_statement))
+
+    while True:
+        if queues.split_queue.empty():
+            logging.debug("Split queue empty. Mapper is waiting")
+            time.sleep(1)
+        else:
+            split = queues.split_queue.get()
+            if rsettings.extra_key:
+                sql = "{statement} where token({key}, {extra_key}) >= {min} and token({key}, {extra_key}) < {max}".format(statement=map_task.sql_statement, key=map_task.key_column, extra_key=rsettings.extra_key, min=split[0], max=split[1])
+            else:
+                sql = "{statement} where token({key}) >= {min} and token({key}) < {max}".format(statement=map_task.sql_statement, key=map_task.key_column, min=split[0], max=split[1])
+
+            if rsettings.filter_string:
+                sql = "{} and {}".format(sql, rsettings.filter_string)
+            t = CassandraWorkerTask(sql, split, map_task.parser)
+            queues.worker_queue.put(t)
+            queues.stats_queue_mapper.put(0)
+            logging.debug("Mapper prepared work task: {}".format(sql))
+
 
 
 if __name__ == "__main__":
@@ -989,37 +1007,51 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(level=logging.INFO)
 
-    session = get_cassandra_session(args.host, args.port, args.user,
-                                    args.password, args.ssl_cert, args.ssl_key,
-                                    args.ssl_v1)
-    cas_settings = (args.host, args.port, args.user,
-                                    args.password, args.ssl_cert, args.ssl_key,
-                                    args.ssl_v1)
-
+    # TODO: move this to runtime settings constructor
     if args.min_token and args.max_token:
         tr = Token_range(args.min_token, args.max_token)
     else:
         tr = Token_range(default_min_token, default_max_token)
 
+    cas_settings = CassandraSettings()
+    cas_settings.host = args.host
+    cas_settings.user = args.user
+    cas_settings.port = args.port
+    cas_settings.password = args.password
+    cas_settings.ssl_cert = args.ssl_cert
+    cas_settings.ssl_key = args.ssl_key
+    cas_settings.ssl_v1 = args.ssl_v1
+
+    queues = Queues()
+
+    rsettings = RuntimeSettings()
+    rsettings.keyspace = args.keyspace
+    rsettings.table = args.table
+    rsettings.split = args.split
+    rsettings.key = args.key
+    rsettings.extra_key = args.extra_key
+    rsettings.filter_string = args.filter_string
+    rsettings.tr = tr
+    rsettings.cas_settings = cas_settings
+
+    process_manager(queues,rsettings)
+
+
     if args.action == "find-nulls":
-        find_null_cells(session, args.keyspace, args.table, "id", "comment")
+        find_null_cells(args.keyspace, args.table, "id", "comment")
     elif args.action == "count-rows":
-        print_rows_count(session, args.keyspace, args.table, args.key,
-                         args.split, args.filter_string)
+        print_rows_count(queues, rsettings)
     elif args.action == "print-rows":
-        print_rows(session, args.keyspace, args.table, args.key, args.split,
-                   args.value_column, args.filter_string, args.extra_key)
+        print_rows(queues, rsettings)
+    elif args.action == "delete-rows":
+        delete_rows(queues, rsettings)
     elif args.action == "find-wide-partitions":
-        find_wide_partitions(session, args.keyspace, args.table, args.key,
+        find_wide_partitions(args.keyspace, args.table, args.key,
                              args.split, args.value_column, args.filter_string)
     elif args.action == "update-rows":
-        update_rows(session, args.keyspace, args.table, args.key,
+        update_rows(args.keyspace, args.table, args.key,
                     args.update_key, args.update_value, args.split,
                     args.filter_string, args.extra_key)
-    elif args.action == "delete-rows":
-        delete_rows(cas_settings,session, args.keyspace, args.table, args.key, args.split,
-                    args.filter_string, tr, args.extra_key)
-
     else:
         # this won't be accepted by argparse anyways
         sys.exit(1)
