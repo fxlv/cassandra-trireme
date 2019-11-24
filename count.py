@@ -895,6 +895,18 @@ def process_manager(queues, rsettings):
         worker_process.start()
         workers.append(worker_process)
 
+    while True:
+        for w in workers:
+            if not w.is_alive():
+                logging.warning("Process {} died.".format(w))
+                workers.remove(w)
+                time.sleep(1)
+                logging.warning("Starting a new process")
+                worker_process = multiprocessing.Process(target=cassandra_worker, args=(queues, rsettings))
+                worker_process.start()
+                workers.append(worker_process)
+        time.sleep(1)
+
 def reducer(queues, rsettings):
     """Filter out the relevant information from Cassandra results"""
 
@@ -947,7 +959,11 @@ def cassandra_worker(queues, rsettings):
             else:
                 task = queues.worker_queue.get()
                 logging.debug("Got task {} from worker queue".format(task))
-                r = session.execute(task.sql)
+                try:
+                    r = session.execute(task.sql)
+                except:
+                    logging.warning("Cassandra connection issues!")
+                    return False
                 if task.task_type == "delete":
                     queues.stats_queue_deleted.put(0)
                     logging.debug("DELETE: {}".format(task.sql))
@@ -965,7 +981,7 @@ def cassandra_worker(queues, rsettings):
 def mapper(queues, rsettings):
     """Prepares SQL statements for worker and puts tasks in worker queue"""
     try:
-        map_task = queues.mapper_queue.get(True,5) # initially, wait for 5 sec to receive first work orders
+        map_task = queues.mapper_queue.get(True,10) # initially, wait for 5 sec to receive first work orders
     except:
         logging.warning("Mapper did not receive any work...timed out.")
         return False
@@ -1035,8 +1051,8 @@ if __name__ == "__main__":
     rsettings.cas_settings = cas_settings
     rsettings.workers = args.workers
 
-    process_manager(queues,rsettings)
-
+    pm = multiprocessing.Process(target=process_manager, args=(queues, rsettings))
+    pm.start()
 
     if args.action == "find-nulls":
         find_null_cells(args.keyspace, args.table, "id", "comment")
