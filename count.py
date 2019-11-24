@@ -377,7 +377,7 @@ def splitter(queues, rsettings):
     while i <= tr.max - 1:
         if queues.split_queue.full():
             logging.debug("There are {} splits prepared. Pausing for a second.".format(splitcounter))
-            time.sleep(1)
+            time.sleep(0.5)
         else:
             i_max = i + pow(10, rsettings.split)
             if i_max > tr.max:
