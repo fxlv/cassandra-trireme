@@ -16,6 +16,7 @@ import multiprocessing
 import time
 import platform
 import os
+import random
 from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
 
 from cassandra.auth import PlainTextAuthProvider
@@ -942,7 +943,12 @@ def cassandra_worker(queues, rsettings):
     """Executes SQL statements and puts results in result queue"""
     cas_settings = rsettings.cas_settings
     pid = os.getpid()
-    session = get_cassandra_session(cas_settings.host, cas_settings.port, cas_settings.user,
+    if "," in cas_settings.host:
+        host = random.choice(cas_settings.host.split(","))
+        logging.info("Picking random host: {}".format(host))
+    else:
+        host = cas_settings.host
+    session = get_cassandra_session(host, cas_settings.port, cas_settings.user,
                                     cas_settings.password, cas_settings.ssl_cert, cas_settings.ssl_key,
                                     cas_settings.ssl_v1)
 
