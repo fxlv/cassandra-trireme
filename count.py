@@ -631,9 +631,7 @@ def get_rows_count(queues, rsettings):
     # send kill signal to process manager to stop all workers
     queues.kill.set()
     time.sleep(4) # wait for the kill event to reach all processes
-    print()
-    print("Total row count is {}".format(total))
-    print()
+    return total
 
     # now, chill and wait for results
     #
