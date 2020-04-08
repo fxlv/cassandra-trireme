@@ -86,6 +86,7 @@ def parse_user_args():
                         default="cassandra",
                         help="Cassandra password")
     parser.add_argument("--datacenter", type=str, default=None, help="Prefer this datacenter and use DCAwareRoundRobinPolicy")
+    parser.add_argument("--ssl-ca-cert", dest="cacert", type=str, default=None, help="CA cert to use")
     parser.add_argument("--ssl-certificate",
                         dest="ssl_cert",
                         type=str,
@@ -118,7 +119,7 @@ def get_cassandra_session(host,
                           password,
                           ssl_cert,
                           ssl_key,
-                          dc,
+                          dc, cacert,
                           ssl_v1=False):
     """Establish Cassandra connection and return session object."""
 
@@ -142,6 +143,8 @@ def get_cassandra_session(host,
         if int(py_version[0]) == 3 and int(py_version[1]) > 6:
             ssl_context = SSLContext(tls_version)
             ssl_context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+            if cacert:
+                ssl_context.load_verify_locations(cacert)
             if dc:
                 cluster = Cluster([host],
                                   port=port, load_balancing_policy=DCAwareRoundRobinPolicy(local_dc=dc),
@@ -977,7 +980,7 @@ def cassandra_worker(queues, rsettings):
     if rsettings.worker_max_delay_on_startup > 0:
         time.sleep(random.choice(range(rsettings.worker_max_delay_on_startup)))
     session = get_cassandra_session(host, cas_settings.port, cas_settings.user,
-                                    cas_settings.password, cas_settings.ssl_cert, cas_settings.ssl_key, cas_settings.dc,
+                                    cas_settings.password, cas_settings.ssl_cert, cas_settings.ssl_key, cas_settings.dc, cas_settings.cacert,
                                     cas_settings.ssl_v1 )
 
     sql = "use {}".format(rsettings.keyspace)
@@ -1084,6 +1087,7 @@ if __name__ == "__main__":
     cas_settings.ssl_cert = args.ssl_cert
     cas_settings.ssl_key = args.ssl_key
     cas_settings.ssl_v1 = args.ssl_v1
+    cas_settings.cacert = args.cacert
     cas_settings.dc = args.datacenter
 
     queues = Queues()
