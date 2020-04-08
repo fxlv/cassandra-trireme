@@ -65,6 +65,8 @@ class Queues:
         self.stats_queue_deleted = multiprocessing.Queue(stats_q_size)
         self.stats_queue_delete_scheduled = multiprocessing.Queue(stats_q_size)
         self.stats_queue_results_consumed = multiprocessing.Queue(stats_q_size)
+        # kill event, while it is not a queue, we'd love to pass it around
+        self.kill = multiprocessing.Event()
 
 
 class RuntimeSettings:
@@ -79,6 +81,7 @@ class RuntimeSettings:
         self.filter_string = None
         self.tr = None
         self.cas_settings = None
+        self.worker_max_delay_on_startup = 0
 
 
 class CassandraSettings:

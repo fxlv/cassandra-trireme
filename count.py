@@ -387,7 +387,10 @@ def splitter(queues, rsettings):
             queues.stats_queue_splits.put(0)
             splitcounter+=1
             i = i_max
-    logging.info("Splitter is done. All splits created")
+
+    # kill pill for split queue, signaling that we are done
+    queues.split_queue.put(False)
+    logging.debug("Splitter is done. All splits created")
 
 
 def distributed_sql_query(sql_statement, cas_settings, queues, rsettings):
@@ -616,13 +619,21 @@ def get_rows_count(queues, rsettings):
         if queues.results_queue.empty():
             logging.debug("Waiting on results...")
             logging.debug("Total so far: {}".format(total))
-
             time.sleep(5)
         else:
             res = queues.results_queue.get()
+            if res is False:
+                # kill pill received
+                # end the loop and present the results
+                break
             queues.stats_queue_results_consumed.put(0)
             total += res.value
+    # send kill signal to process manager to stop all workers
+    queues.kill.set()
+    time.sleep(4) # wait for the kill event to reach all processes
+    print()
     print("Total row count is {}".format(total))
+    print()
 
     # now, chill and wait for results
     #
@@ -795,7 +806,7 @@ def stats_monitor(queues, rsettings):
 
     predicted_split_count = round(split_predicter(rsettings.tr,rsettings.split))
 
-    while True:
+    while not queues.kill.is_set():
         iteration_start = datetime.datetime.now()
         # TODO: refactor this to use a map of queue and stats counter and do it in a loop instead of 3 conditionals
         if not queues.stats_queue_splits.empty():
@@ -856,9 +867,11 @@ def stats_monitor(queues, rsettings):
         if stats_delete_scheduled_count >0:
             print("Deleted {}/{} rows".format(stats_deleted_count,stats_delete_scheduled_count))
         time.sleep(1)
+    else:
+        logging.debug("Stats monitor exiting.")
 
 def queue_monitor(queues, rsettings):
-    while True:
+    while not queues.kill.is_set():
 
         logging.debug("Queue status:")
         logging.debug("Split queue full: {} empty: {}".format(queues.split_queue.full(), queues.split_queue.empty()))
@@ -866,6 +879,8 @@ def queue_monitor(queues, rsettings):
         logging.debug("Worker queue full: {} empty: {}".format(queues.worker_queue.full(), queues.worker_queue.empty()))
         logging.debug("Results queue full: {} empty: {}".format(queues.results_queue.full(), queues.results_queue.empty()))
         time.sleep(5)
+    else:
+        logging.debug("Queue monitor exiting.")
 
 def process_manager(queues, rsettings):
 
@@ -884,10 +899,11 @@ def process_manager(queues, rsettings):
     # mapper
     mapper_process = multiprocessing.Process(target=mapper, args=(queues,rsettings))
     mapper_process.start()
-    
+
+    # TODO: remove this, as reducer is not used
     # reducer
-    reducer_process = multiprocessing.Process(target=reducer, args=(queues,rsettings))
-    reducer_process.start()
+    #reducer_process = multiprocessing.Process(target=reducer, args=(queues,rsettings))
+    #reducer_process.start()
 
     workers = []
     for w in range(rsettings.workers):
@@ -896,7 +912,7 @@ def process_manager(queues, rsettings):
         worker_process.start()
         workers.append(worker_process)
 
-    while True:
+    while not queues.kill.is_set():
         for w in workers:
             if not w.is_alive():
                 logging.warning("Process {} died.".format(w))
@@ -907,8 +923,10 @@ def process_manager(queues, rsettings):
                 worker_process.start()
                 workers.append(worker_process)
         time.sleep(1)
+    else:
+        logging.debug("Global kill event! Process manager is stopping.")
 
-def reducer(queues, rsettings):
+def reducer2(queues, rsettings):
     """Filter out the relevant information from Cassandra results"""
 
     pid = os.getpid()
@@ -948,6 +966,10 @@ def cassandra_worker(queues, rsettings):
         logging.info("Picking random host: {}".format(host))
     else:
         host = cas_settings.host
+    # starting bunch of sessions at the same time might not be idea, so we add
+    # a bit of random delay
+    if rsettings.worker_max_delay_on_startup > 0:
+        time.sleep(random.choice(range(rsettings.worker_max_delay_on_startup)))
     session = get_cassandra_session(host, cas_settings.port, cas_settings.user,
                                     cas_settings.password, cas_settings.ssl_cert, cas_settings.ssl_key,
                                     cas_settings.ssl_v1)
@@ -957,13 +979,18 @@ def cassandra_worker(queues, rsettings):
     session.execute(sql)
     if not session.is_shutdown:
         logging.debug("Worker {} connected to Cassandra.".format(pid))
-        while True:
+        while not queues.kill.is_set():
             # wait for work
             if queues.worker_queue.empty():
                 logging.debug("Worker {} waiting for work".format(pid))
                 time.sleep(2)
             else:
                 task = queues.worker_queue.get()
+                if task is False:
+                    # kill pill received
+                    # pass it to the results queue
+                    queues.results_queue.put(False)
+                    continue # and return back to waiting for work
                 logging.debug("Got task {} from worker queue".format(task))
                 try:
                     r = session.execute(task.sql)
@@ -982,6 +1009,8 @@ def cassandra_worker(queues, rsettings):
                         logging.debug(res)
                         queues.results_queue.put(res)
                         queues.stats_queue_results.put(0)
+        else:
+            logging.debug("Worker stopping due to kill event.")
 
 
 def mapper(queues, rsettings):
@@ -1000,6 +1029,12 @@ def mapper(queues, rsettings):
             time.sleep(1)
         else:
             split = queues.split_queue.get()
+            if split is False:
+                # this is a kill pill, no more work, let's relax
+                logging.debug("Mapper has received kill pill, passing it on to workers and exiting.")
+                queues.worker_queue.put(False) # pass the kill pill
+                return True
+
             if rsettings.extra_key:
                 sql = "{statement} where token({key}, {extra_key}) >= {min} and token({key}, {extra_key}) < {max}".format(statement=map_task.sql_statement, key=map_task.key_column, extra_key=rsettings.extra_key, min=split[0], max=split[1])
             else:
@@ -1056,10 +1091,14 @@ if __name__ == "__main__":
     rsettings.tr = tr
     rsettings.cas_settings = cas_settings
     rsettings.workers = args.workers
+    if rsettings.workers > 10:
+        # if more than 10 workers are used, we add delay to their startup logic
+        rsettings.worker_max_delay_on_startup = rsettings.workers * 2
 
     pm = multiprocessing.Process(target=process_manager, args=(queues, rsettings))
     pm.start()
 
+    # TODO: needs re-implementation
     if args.action == "find-nulls":
         find_null_cells(args.keyspace, args.table, "id", "comment")
     elif args.action == "count-rows":
@@ -1068,9 +1107,11 @@ if __name__ == "__main__":
         print_rows(queues, rsettings)
     elif args.action == "delete-rows":
         delete_rows(queues, rsettings)
+    # TODO: needs re-implementation
     elif args.action == "find-wide-partitions":
         find_wide_partitions(args.keyspace, args.table, args.key,
                              args.split, args.value_column, args.filter_string)
+    # TODO: needs re-implementation
     elif args.action == "update-rows":
         update_rows(args.keyspace, args.table, args.key,
                     args.update_key, args.update_value, args.split,
