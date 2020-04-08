@@ -140,7 +140,7 @@ def get_cassandra_session(host,
         else:
             tls_version = PROTOCOL_TLSv1_2
 
-        if int(py_version[0]) == 3 and int(py_version[1]) > 6:
+        if int(py_version[0]) == 3 and int(py_version[1]) > 4:
             ssl_context = SSLContext(tls_version)
             ssl_context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
             if cacert:
