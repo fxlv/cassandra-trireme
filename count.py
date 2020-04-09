@@ -814,7 +814,8 @@ def stats_monitor(queues, rsettings):
 
 
     predicted_split_count = round(split_predicter(rsettings.tr,rsettings.split))
-
+    last_iteration_time = None
+    overall_start_time = datetime.datetime.now()
     while not queues.kill.is_set():
         iteration_start = datetime.datetime.now()
         # TODO: refactor this to use a map of queue and stats counter and do it in a loop instead of 3 conditionals
@@ -871,11 +872,25 @@ def stats_monitor(queues, rsettings):
                     stats_delete_scheduled_count += 1
             except:
                 logging.warning("Stats queue for delete scheduled empty, but noone else should have been consuming it.")
-        print()
-        print("Performance::  splits: {}/{} ({}), maps: {} ({}), results consumption: {}/{} ({})".format(stats_split_count, predicted_split_count, stats_split_count_delta, stats_map_count, stats_map_count_delta,  stats_result_consumed_count, stats_result_count, stats_result_count_delta))
+
+        if last_iteration_time:
+            iteration_delta = iteration_start - last_iteration_time
+            result_rate = round(stats_result_count_delta / iteration_delta.total_seconds())
+            results_remaining = predicted_split_count - stats_result_count
+            seconds_remaining = results_remaining / result_rate
+            percent = predicted_split_count / 100
+            done_percent = round(stats_result_count / percent)
+            print("result delta delta is {}".format(stats_result_count_delta))
+            print("Iteration delta is {}".format(iteration_delta.total_seconds()))
+            print()
+            print("Performance::  splits: {}/{} ({}), maps: {} ({}), results consumption: {}/{} ({})".format(
+                stats_split_count, predicted_split_count, stats_split_count_delta, stats_map_count,
+                stats_map_count_delta, stats_result_consumed_count, stats_result_count, stats_result_count_delta))
+            print("{}% done. {} results/s. Seconds remaining: {}".format(done_percent, result_rate, seconds_remaining))
         if stats_delete_scheduled_count >0:
             print("Deleted {}/{} rows".format(stats_deleted_count,stats_delete_scheduled_count))
         time.sleep(1)
+        last_iteration_time = iteration_start
     else:
         logging.debug("Stats monitor exiting.")
 
