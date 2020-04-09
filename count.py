@@ -877,6 +877,8 @@ def stats_monitor(queues, rsettings):
             iteration_delta = iteration_start - last_iteration_time
             result_rate = round(stats_result_count_delta / iteration_delta.total_seconds())
             results_remaining = predicted_split_count - stats_result_count
+            if result_rate == 0:
+                continue
             seconds_remaining = results_remaining / result_rate
             percent = predicted_split_count / 100
             done_percent = round(stats_result_count / percent)
