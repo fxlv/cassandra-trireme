@@ -881,7 +881,12 @@ def stats_monitor(queues, rsettings):
                 continue
             seconds_remaining = results_remaining / result_rate
             percent = predicted_split_count / 100
-            done_percent = round(stats_result_count / percent)
+            # avoid division by zero in the very beginning,
+            # when not enough work is done yet
+            if percent == 0:
+                done_percent = 0
+            else:
+                done_percent = round(stats_result_count / percent)
             print("result delta delta is {}".format(stats_result_count_delta))
             print("Iteration delta is {}".format(iteration_delta.total_seconds()))
             print()
