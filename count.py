@@ -27,7 +27,7 @@ from trireme.datastructures import Result, RowForDeletion, Token_range, Mapper_t
 from trireme.presentation import human_time
 
 # settings
-from settings import default_min_token, default_max_token
+import settings
 from trireme.stats import stats_monitor, split_predicter
 
 
@@ -993,18 +993,45 @@ if __name__ == "__main__":
     if args.min_token and args.max_token:
         tr = Token_range(args.min_token, args.max_token)
     else:
-        tr = Token_range(default_min_token, default_max_token)
+        tr = Token_range(settings.default_min_token, settings.default_max_token)
 
     cas_settings = CassandraSettings()
     cas_settings.host = args.host
-    cas_settings.user = args.user
-    cas_settings.port = args.port
-    cas_settings.password = args.password
-    cas_settings.ssl_cert = args.ssl_cert
-    cas_settings.ssl_key = args.ssl_key
-    cas_settings.ssl_v1 = args.ssl_v1
-    cas_settings.cacert = args.cacert
+    # some of the settings can be specified either on command line
+    # or in the settings file
+    if hasattr(settings, "db_user"):
+        cas_settings.user = settings.db_user
+    else:
+        cas_settings.user = args.user
+
+    if hasattr(settings, "db_password"):
+        cas_settings.password = settings.db_password
+    else:
+        cas_settings.password = args.password
+
+    if hasattr(settings, "ssl_cert"):
+        cas_settings.ssl_cert = settings.ssl_cert
+    else:
+        cas_settings.ssl_cert = args.ssl_cert
+
+    if hasattr(settings, "ssl_key"):
+        cas_settings.ssl_key = settings.ssl_key
+    else:
+        cas_settings.ssl_key = args.ssl_key
+
+    if hasattr(settings, "cacert"):
+        cas_settings.cacert = settings.ssl_cacert
+    else:
+        cas_settings.cacert = args.cacert
+
     cas_settings.dc = args.datacenter
+
+    cas_settings.port = args.port
+
+
+
+    cas_settings.ssl_v1 = args.ssl_v1
+
 
     queues = Queues()
 
