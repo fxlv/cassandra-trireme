@@ -12,7 +12,7 @@ def seconds_to_human(seconds):
         remaining_minutes = minutes % 60
         hours = round((minutes - remaining_minutes) / 60)
         minutes = remaining_minutes
-    return hours, minutes, seconds
+    return hours, minutes, round(seconds)
 
 
 def human_time(seconds):
@@ -22,10 +22,9 @@ def human_time(seconds):
         human_time_string = "{} hours, {} minutes, {} seconds".format(
             hours, minutes, seconds)
     elif minutes:
-        human_time_string = "{} hours, {} minutes, {} seconds".format(
-            hours, minutes, seconds)
+        human_time_string = "{} minutes, {} seconds".format(
+            minutes, seconds)
     else:
-        human_time_string = "{} hours, {} minutes, {} seconds".format(
-            hours, minutes, seconds)
+        human_time_string = "{} seconds".format(seconds)
 
     return human_time_string
