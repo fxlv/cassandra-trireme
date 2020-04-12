@@ -22,9 +22,9 @@ from ssl import SSLContext, PROTOCOL_TLSv1, PROTOCOL_TLSv1_2
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cluster import Cluster
 from cassandra.policies import DCAwareRoundRobinPolicy
-from datastructures import Result, RowForDeletion, Token_range, Mapper_task, Queues, RuntimeSettings, CassandraSettings, \
+from trireme.datastructures import Result, RowForDeletion, Token_range, Mapper_task, Queues, RuntimeSettings, CassandraSettings, \
     CassandraWorkerTask
-from presentation import human_time
+from trireme.presentation import human_time
 
 # settings
 from settings import default_min_token, default_max_token
